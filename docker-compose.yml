@@ -11,9 +11,25 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       - redis
+      - postgres
 
   redis:
     image: redis:7
     container_name: llm-cache-gateway-redis
     ports:
       - "6379:6379"
+
+  postgres:
+    image: postgres:16
+    container_name: llm-cache-gateway-postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=Shashank@2006
+      - POSTGRES_DB=semanticdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
