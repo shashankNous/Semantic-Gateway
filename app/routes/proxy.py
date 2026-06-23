@@ -16,16 +16,18 @@ load_dotenv()
 router = APIRouter()
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+UPSTREAM_BASE_URL = os.getenv("UPSTREAM_BASE_URL", "https://api.mistral.ai/v1").rstrip("/")
+UPSTREAM_MODEL = os.getenv("UPSTREAM_MODEL", "mistral-small-latest")
 MISTRAL_BASE_URL = os.getenv(
     "MISTRAL_BASE_URL",
-    "https://api.mistral.ai/v1/chat/completions",
+    f"{UPSTREAM_BASE_URL}/chat/completions",
 )
 
 
 def is_cacheable(body: dict) -> bool:
     if body.get("stream") is True:
         return False
-    if body.get("temperature", 1) != 0:
+    if body.get("temperature", 0) != 0:
         return False
     if body.get("tools") or body.get("tool_choice"):
         return False
@@ -43,7 +45,8 @@ async def proxy(request: Request):
 
     start = time.perf_counter()
     body = await request.json()
-    cache_key = build_cache_key(body)
+    body.setdefault("model", UPSTREAM_MODEL)
+    cache_key = build_cache_key(body, tenant_id=str(tenant_id))
     model = body.get("model", "unknown")
 
     # 2. Check Redis cache
