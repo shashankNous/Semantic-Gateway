@@ -8,6 +8,8 @@ async def log_api_request(
     latency_ms: int,
     model: str,
     response_body: dict,
+    cache_status: str | None = None,
+    similarity: float | None = None,
 ):
     usage = response_body.get("usage", {})
     prompt_tokens = usage.get("prompt_tokens")
@@ -21,4 +23,6 @@ async def log_api_request(
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        cache_status=cache_status,
+        similarity=similarity,
     )

@@ -50,7 +50,7 @@ async def get_tenant_by_key(api_key: str):
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, name FROM tenants WHERE api_key = $1",
+            "SELECT id, uuid, name FROM tenants WHERE api_key = $1",
             api_key,
         )
         return row  # None if not found
@@ -64,15 +64,50 @@ async def log_request(
     model: str,
     prompt_tokens: int | None,
     completion_tokens: int | None,
+    cache_status: str | None = None,
+    similarity: float | None = None,
 ):
     if pool is None:
         raise RuntimeError("Postgres pool is not initialized")
 
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO requests (tenant_id, prompt_hash, hit, latency_ms, model, prompt_tokens, completion_tokens)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            """,
-            tenant_id, prompt_hash, hit, latency_ms, model, prompt_tokens, completion_tokens,
-        )
+        try:
+            await conn.execute(
+                """
+                INSERT INTO requests (
+                    tenant_id,
+                    prompt_hash,
+                    hit,
+                    latency_ms,
+                    model,
+                    prompt_tokens,
+                    completion_tokens,
+                    cache_status,
+                    similarity
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                """,
+                tenant_id,
+                prompt_hash,
+                hit,
+                latency_ms,
+                model,
+                prompt_tokens,
+                completion_tokens,
+                cache_status,
+                similarity,
+            )
+        except asyncpg.UndefinedColumnError:
+            await conn.execute(
+                """
+                INSERT INTO requests (tenant_id, prompt_hash, hit, latency_ms, model, prompt_tokens, completion_tokens)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                tenant_id,
+                prompt_hash,
+                hit,
+                latency_ms,
+                model,
+                prompt_tokens,
+                completion_tokens,
+            )

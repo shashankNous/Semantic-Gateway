@@ -14,4 +14,8 @@ async def verify_api_key(request: Request) -> dict:
     if tenant is None:
         raise HTTPException(status_code=401, detail="Unknown API key")
 
-    return {"tenant_id": tenant["id"], "name": tenant["name"]}
+    return {
+        "tenant_id": tenant["id"],
+        "tenant_uuid": tenant["uuid"],
+        "name": tenant["name"],
+    }
