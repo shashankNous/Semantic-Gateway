@@ -161,3 +161,92 @@ def test_uncacheable_queries_bypass_redis_and_semantic_cache(monkeypatch):
     assert response.status_code == 200
     assert response.headers["X-Cache"] == "UNCACHEABLE"
     assert response_json(response)["choices"][0]["message"]["content"] == "fresh"
+
+
+def test_semantic_hit_after_redis_miss(monkeypatch):
+    logged = {}
+
+    async def fake_verify_api_key(request):
+        return {"tenant_id": 1, "tenant_uuid": uuid4(), "name": "test"}
+
+    async def fake_get_cached_response(key):
+        return None
+
+    async def fake_embed_text(text):
+        return [0.1, 0.2, 0.3]
+
+    async def fake_find_semantic_match(tenant_uuid, embedding, *args, **kwargs):
+        return {
+            "id": uuid4(),
+            "response_json": {"choices": [{"message": {"content": "semantic"}}]},
+            "normalized_query": "what is caching",
+            "similarity": 0.95,
+        }
+
+    async def fail_upstream(*args, **kwargs):
+        raise AssertionError("upstream should not be called on semantic hit")
+
+    async def fake_log(**kwargs):
+        logged.update(kwargs)
+
+    monkeypatch.setattr(proxy_module, "MISTRAL_API_KEY", "test")
+    monkeypatch.setattr(proxy_module, "verify_api_key", fake_verify_api_key)
+    monkeypatch.setattr(proxy_module, "get_cached_response", fake_get_cached_response)
+    monkeypatch.setattr(proxy_module, "embed_text", fake_embed_text)
+    monkeypatch.setattr(proxy_module, "find_semantic_match", fake_find_semantic_match)
+    monkeypatch.setattr(proxy_module, "call_upstream_llm", fail_upstream)
+    monkeypatch.setattr(proxy_module, "log_request_result", fake_log)
+
+    response = run(proxy_module.proxy(FakeRequest(chat_body("What is caching?"))))
+
+    assert response.status_code == 200
+    assert response.headers["X-Cache"] == "SEMANTIC_HIT"
+    assert response_json(response)["choices"][0]["message"]["content"] == "semantic"
+    assert logged["cache_status"] == "SEMANTIC_HIT"
+    assert logged["similarity"] == 0.95
+
+
+def test_true_miss_calls_upstream_and_stores_in_both_caches(monkeypatch):
+    stored = {}
+
+    async def fake_verify_api_key(request):
+        return {"tenant_id": 1, "tenant_uuid": uuid4(), "name": "test"}
+
+    async def fake_get_cached_response(key):
+        return None
+
+    async def fake_embed_text(text):
+        return [0.4, 0.5, 0.6]
+
+    async def fake_find_semantic_match(tenant_uuid, embedding, *args, **kwargs):
+        return None
+
+    async def fake_call_upstream(body):
+        return 200, {"choices": [{"message": {"content": "fresh"}}]}
+
+    async def fake_set_cached_response(key, response):
+        stored["redis"] = response
+
+    async def fake_store_semantic_cache_entry(tenant_uuid, normalized_query, prompt_hash, response_json, embedding, model=None):
+        stored["semantic"] = response_json
+
+    async def fake_log(**kwargs):
+        stored["cache_status"] = kwargs.get("cache_status")
+
+    monkeypatch.setattr(proxy_module, "MISTRAL_API_KEY", "test")
+    monkeypatch.setattr(proxy_module, "verify_api_key", fake_verify_api_key)
+    monkeypatch.setattr(proxy_module, "get_cached_response", fake_get_cached_response)
+    monkeypatch.setattr(proxy_module, "embed_text", fake_embed_text)
+    monkeypatch.setattr(proxy_module, "find_semantic_match", fake_find_semantic_match)
+    monkeypatch.setattr(proxy_module, "call_upstream_llm", fake_call_upstream)
+    monkeypatch.setattr(proxy_module, "set_cached_response", fake_set_cached_response)
+    monkeypatch.setattr(proxy_module, "store_semantic_cache_entry", fake_store_semantic_cache_entry)
+    monkeypatch.setattr(proxy_module, "log_request_result", fake_log)
+
+    response = run(proxy_module.proxy(FakeRequest(chat_body("Explain pgvector cosine search"))))
+
+    assert response.status_code == 200
+    assert response.headers["X-Cache"] == "MISS"
+    assert stored["redis"]["choices"][0]["message"]["content"] == "fresh"
+    assert stored["semantic"]["choices"][0]["message"]["content"] == "fresh"
+    assert stored["cache_status"] == "MISS"
