@@ -104,7 +104,8 @@ async def proxy(request: Request):
     model = body.get("model", "unknown")
     cache_key = build_cache_key(body, tenant_id=str(tenant_id))
 
-    normalized_query = normalize_query(extract_query_text(body))
+    raw_query = extract_query_text(body)
+    normalized_query = normalize_query(raw_query)
     cacheable = is_request_cacheable(body) and is_cacheable(normalized_query)
 
     embedding = None
@@ -134,7 +135,12 @@ async def proxy(request: Request):
 
         # 3. Check semantic cache
         embedding = await embed_text(normalized_query)
-        semantic_match = await find_semantic_match(tenant_uuid, embedding)
+        semantic_match = await find_semantic_match(
+            tenant_uuid,
+            embedding,
+            normalized_query,
+            raw_query=raw_query,
+        )
 
         if semantic_match is not None:
             latency_ms = int((time.perf_counter() - start) * 1000)
@@ -175,6 +181,7 @@ async def proxy(request: Request):
                 content,
                 embedding,
                 model,
+                raw_query=raw_query,
             )
 
         await log_request_result(

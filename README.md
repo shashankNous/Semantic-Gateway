@@ -5,7 +5,16 @@ calls by checking two caches before ever calling the model:
 
 1. **Exact-match cache (Redis)** — same tenant, same normalized request, byte-for-byte.
 2. **Semantic cache (Postgres + pgvector)** — same tenant, a *rephrased* version of a
-   question it has already answered, matched via embedding cosine similarity.
+   question it has already answered, matched via embedding cosine similarity and then
+   verified (`app/services/match_verification.py`) so that near-identical embeddings
+   carrying opposite or different meaning are not served from cache.
+
+`cache_entries` stores both the `normalized_query` (what gets embedded and matched) and
+the `raw_query` (added in `migrations/003_raw_query.sql`). Verification runs against the
+raw text because normalization lowercases everything, which would erase the
+capitalization the entity check depends on. Rows written before that migration have a
+`NULL` `raw_query` and fall back to the normalized form, where the polarity, negation,
+and number checks still apply.
 
 Only on a miss in both does it call Mistral, and it stores the result in both caches
 for next time.
@@ -19,8 +28,17 @@ client -> gateway (FastAPI)
             |
             +--> Redis exact-match check          -> hit: X-Cache: EXACT_HIT
             |
-            +--> embed query, pgvector similarity  -> hit: X-Cache: SEMANTIC_HIT
-            |       search (Postgres)
+            +--> embed query, pgvector similarity
+            |       search (Postgres), top 5 by distance
+            |          |
+            |          +--> for each candidate over the threshold, verify the
+            |          |      match against the raw (un-normalized) query text:
+            |          |      reject on polarity/negation flips ("enable" vs
+            |          |      "disable") or swapped entities and numbers
+            |          |      ("Delhi" vs "Mumbai", "version 2" vs "3")
+            |          |
+            |          +--> first candidate that passes -> X-Cache: SEMANTIC_HIT
+            |                 all rejected -> falls through to a MISS
             |
             +--> Mistral (on miss)                 -> X-Cache: MISS
             |       |
@@ -63,6 +81,7 @@ the semantic cache tables, which key on `tenants.uuid`).
    ```bash
    docker exec -i llm-cache-gateway-postgres psql -U postgres -d semanticdb < migrations/001_migrations.sql
    docker exec -i llm-cache-gateway-postgres psql -U postgres -d semanticdb < migrations/002_semantic_cache.sql
+   docker exec -i llm-cache-gateway-postgres psql -U postgres -d semanticdb < migrations/003_raw_query.sql
    ```
 
 4. Insert a tenant row so you have an API key to call the gateway with:
