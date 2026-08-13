@@ -2,3 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Per-machine Claude Code settings (permission grants, local paths).
+# .claude/launch.json is shared and stays tracked.
+.claude/settings.local.json
