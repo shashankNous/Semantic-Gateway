@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-brand-deep text-sidecar antialiased;
+}
+
+/* Native dropdown popups ignore the parent's colours, so set them explicitly
+   or the option list renders as white-on-white in some browsers. */
+select option {
+  @apply bg-brand-deep text-sidecar;
+}
