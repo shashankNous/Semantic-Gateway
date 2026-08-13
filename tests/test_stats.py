@@ -52,7 +52,8 @@ def test_get_stats_aggregates_by_cache_status(monkeypatch):
     assert stats["uncacheable_count"] == 1
     assert stats["hit_rate"] == round(8 / 11, 4)
     assert stats["avg_latency_ms_by_cache_status"]["EXACT_HIT"] == 10.0
-    assert stats["estimated_tokens_saved"] == 100 + 50 + 60 + 30
+    assert stats["prompt_tokens_saved"] == 100 + 60
+    assert stats["completion_tokens_saved"] == 50 + 30
 
 
 def test_get_stats_with_no_requests(monkeypatch):
@@ -62,4 +63,6 @@ def test_get_stats_with_no_requests(monkeypatch):
 
     assert stats["total_requests"] == 0
     assert stats["hit_rate"] == 0.0
-    assert stats["estimated_tokens_saved"] == 0
+    assert stats["prompt_tokens_saved"] == 0
+    assert stats["completion_tokens_saved"] == 0
+    assert stats["estimated_cost_saved_usd"] == 0.0
