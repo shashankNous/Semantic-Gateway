@@ -128,12 +128,47 @@ curl -s http://localhost:8000/v1/chat/completions \
 # X-Cache: SEMANTIC_HIT
 ```
 
-## Stats endpoint
+## Seeding demo data
 
-`GET /v1/stats?tenant_id=<id>` aggregates the `requests` log table for a tenant:
-total requests, counts and average latency per `cache_status`, overall hit rate, and
-an estimated token/cost savings figure (sum of prompt + completion tokens on cache
-hits — tokens that were never sent to Mistral).
+To look at the stats endpoints (or the dashboard) without driving real traffic first,
+`scripts/seed_demo.py` writes a tenant with seven days of history and a warm semantic
+cache. It applies migrations `001`–`004` if needed and is safe to re-run — it replaces
+its own data and keeps the same tenant ids.
+
+```bash
+python scripts/seed_demo.py
+```
+
+It reads `DATABASE_URL` from the environment, defaulting to
+`postgresql://postgres:demopw@localhost:5433/semanticdb`. If port 5432 is already taken
+by a local Postgres install, a throwaway pgvector instance on 5433 keeps them apart:
+
+```bash
+docker run -d --name semgw-demo -e POSTGRES_PASSWORD=demopw -e POSTGRES_DB=semanticdb -p 5433:5432 pgvector/pgvector:pg16
+```
+
+It seeds two tenants: `tenant_id=1` with data, and `tenant_id=2` with none (for checking
+empty states). It only ever touches tenants whose `api_key` starts with `demo-`.
+
+## Stats endpoints
+
+All three take a `tenant_id` query parameter and back the dashboard in `dashboard/`.
+
+`GET /v1/stats?tenant_id=<id>` aggregates the `requests` log table: total requests,
+counts and average latency per `cache_status`, overall hit rate, and the tokens never
+sent upstream. Prompt and completion tokens are reported **separately**
+(`prompt_tokens_saved` / `completion_tokens_saved`) since every provider prices them
+differently; `estimated_cost_saved_usd` keeps a single blended figure using
+`COST_PER_1K_TOKENS`.
+
+`GET /v1/stats/trend?tenant_id=<id>` groups the last 7 days by day, oldest first, as
+`{date, total_requests, hit_count, hit_rate}`. Days with no traffic are omitted rather
+than reported as zero.
+
+`GET /v1/stats/top-cached?tenant_id=<id>` returns the 20 most-hit `cache_entries` with
+the similarity range each has served. `min_similarity`/`max_similarity` are `NULL` until
+an entry has been served at least once. Note this counts *semantic* hits only — exact
+hits are answered from Redis and never touch `cache_entries`.
 
 ```bash
 curl -s "http://localhost:8000/v1/stats?tenant_id=1"
