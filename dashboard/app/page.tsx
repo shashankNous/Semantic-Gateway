@@ -8,36 +8,30 @@ import { HitRateChart } from "@/components/HitRateChart";
 import { SavingsPanel } from "@/components/SavingsPanel";
 import { TopCachedTable } from "@/components/TopCachedTable";
 
-const DEFAULT_TENANT_ID = Number(process.env.NEXT_PUBLIC_TENANT_ID ?? "1") || 1;
-
 export default function DashboardPage() {
-  const [tenantId, setTenantId] = useState(DEFAULT_TENANT_ID);
   const [modelId, setModelId] = useState(DEFAULT_MODEL_ID);
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(
-    async (signal?: AbortSignal) => {
-      setLoading(true);
-      setError(null);
+  const load = useCallback(async (signal?: AbortSignal) => {
+    setLoading(true);
+    setError(null);
 
-      try {
-        setData(await fetchDashboardData(tenantId, signal));
-      } catch (err) {
-        if (signal?.aborted) return;
-        setData(null);
-        setError(
-          err instanceof Error
-            ? `${err.message} (gateway: ${GATEWAY_URL})`
-            : "Could not reach the gateway.",
-        );
-      } finally {
-        if (!signal?.aborted) setLoading(false);
-      }
-    },
-    [tenantId],
-  );
+    try {
+      setData(await fetchDashboardData(signal));
+    } catch (err) {
+      if (signal?.aborted) return;
+      setData(null);
+      setError(
+        err instanceof Error
+          ? `${err.message} (gateway: ${GATEWAY_URL})`
+          : "Could not reach the gateway.",
+      );
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -55,20 +49,18 @@ export default function DashboardPage() {
           <p className="mt-1 text-sm text-sidecar/65">
             Cache performance and cost avoided ·{" "}
             <code className="text-sidecar/80">{GATEWAY_URL}</code>
+            {data && (
+              <>
+                {" · tenant "}
+                <code className="text-sidecar/80">{data.stats.tenant_id}</code>
+              </>
+            )}
           </p>
         </div>
 
+        {/* No tenant picker: the gateway resolves the tenant from the dashboard
+            token, so this deployment can only ever show its own. */}
         <div className="flex items-end gap-2">
-          <label className="flex flex-col gap-1 text-xs uppercase tracking-wide text-sidecar/65">
-            Tenant ID
-            <input
-              type="number"
-              min={1}
-              value={tenantId}
-              onChange={(event) => setTenantId(Number(event.target.value) || 1)}
-              className="w-24 rounded-md border border-sidecar/25 bg-brand px-3 py-1.5 text-sm normal-case tracking-normal text-sidecar outline-none transition focus:border-sidecar"
-            />
-          </label>
           <button
             type="button"
             onClick={() => void load()}

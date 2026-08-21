@@ -1,6 +1,7 @@
 import asyncio
+from uuid import uuid4
 
-import app.routes.proxy as proxy_module
+import app.routes.stats as stats_module
 
 
 class FakeAcquire:
@@ -32,6 +33,20 @@ class FakeTopCachedConn:
         return self.rows
 
 
+def dashboard_tenant(tenant_id, tenant_uuid=None):
+    """What app.auth.require_dashboard_key() hands the route once the token resolves.
+
+    The routes take this dict, never a caller-supplied tenant_id — that is the
+    whole point of Task 2, so the tests call them the same way the app does.
+    """
+    return {
+        "tenant_id": tenant_id,
+        "tenant_uuid": tenant_uuid or uuid4(),
+        "name": f"tenant-{tenant_id}",
+        "scope": "dashboard",
+    }
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -50,9 +65,9 @@ def test_top_cached_returns_entries_with_similarity_range(monkeypatch):
         entry("what is the refund policy", 12, 0.921, 0.998),
         entry("how do i reset my password", 5, 0.94, 0.94),
     ]
-    monkeypatch.setattr(proxy_module.db, "pool", FakePool(FakeTopCachedConn(rows)))
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(FakeTopCachedConn(rows)))
 
-    result = run(proxy_module.get_top_cached(tenant_id=1))
+    result = run(stats_module.get_top_cached(tenant=dashboard_tenant(1)))
     entries = result["entries"]
 
     assert result["tenant_id"] == 1
@@ -70,9 +85,9 @@ def test_top_cached_handles_never_hit_entries(monkeypatch):
     # An entry that has never been served has NULL similarity bounds and, for rows
     # predating migration 004, a NULL hit_count.
     rows = [entry("a query nobody repeated", None)]
-    monkeypatch.setattr(proxy_module.db, "pool", FakePool(FakeTopCachedConn(rows)))
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(FakeTopCachedConn(rows)))
 
-    entries = run(proxy_module.get_top_cached(tenant_id=1))["entries"]
+    entries = run(stats_module.get_top_cached(tenant=dashboard_tenant(1)))["entries"]
 
     assert entries[0]["hit_count"] == 0
     assert entries[0]["min_similarity"] is None
@@ -80,24 +95,26 @@ def test_top_cached_handles_never_hit_entries(monkeypatch):
 
 
 def test_top_cached_for_brand_new_tenant_is_empty(monkeypatch):
-    monkeypatch.setattr(proxy_module.db, "pool", FakePool(FakeTopCachedConn([])))
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(FakeTopCachedConn([])))
 
-    result = run(proxy_module.get_top_cached(tenant_id=99))
+    result = run(stats_module.get_top_cached(tenant=dashboard_tenant(99)))
 
     assert result["entries"] == []
     assert result["tenant_id"] == 99
 
 
-def test_top_cached_joins_tenants_and_limits_to_20(monkeypatch):
+def test_top_cached_scopes_to_the_tokens_tenant_uuid_and_limits_to_20(monkeypatch):
     conn = FakeTopCachedConn([])
-    monkeypatch.setattr(proxy_module.db, "pool", FakePool(conn))
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(conn))
 
-    run(proxy_module.get_top_cached(tenant_id=3))
+    tenant_uuid = uuid4()
+    run(stats_module.get_top_cached(tenant=dashboard_tenant(3, tenant_uuid)))
 
     sql, param = conn.calls[0]
-    assert param == 3
-    # cache_entries keys on tenants.uuid, so the integer tenant_id must be joined through.
-    assert "JOIN tenants ON tenants.uuid = cache_entries.tenant_id" in sql
-    assert "WHERE tenants.id = $1" in sql
-    assert "ORDER BY cache_entries.hit_count DESC" in sql
+    # cache_entries keys on tenants.uuid, which the token lookup already resolved,
+    # so this filters on it directly rather than joining back through tenants.
+    assert param == str(tenant_uuid)
+    assert "WHERE tenant_id = $1::uuid" in sql
+    assert "JOIN" not in sql
+    assert "ORDER BY hit_count DESC" in sql
     assert "LIMIT 20" in sql

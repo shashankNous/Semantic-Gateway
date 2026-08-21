@@ -11,9 +11,10 @@ export const GATEWAY_URL = (
 ).replace(/\/+$/, "");
 
 /**
- * Requests go to this same-origin prefix, which next.config.mjs rewrites to
- * GATEWAY_URL on the server. Same destination, minus the CORS preflight the
- * gateway is not set up to answer.
+ * Requests go to this same-origin prefix, served by app/gateway/[...path]/route.ts,
+ * which forwards to GATEWAY_URL and attaches the dashboard bearer token server-side.
+ * The browser never holds a credential, and there is no cross-origin request to
+ * preflight.
  */
 const API_BASE = "/gateway";
 
@@ -53,7 +54,13 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   });
 
   if (!res.ok) {
-    throw new Error(`Gateway returned ${res.status} for ${path}`);
+    // A 401 here means the configured GATEWAY_DASHBOARD_TOKEN is wrong or is a
+    // proxy key rather than a dash_... token — worth saying so plainly.
+    const hint =
+      res.status === 401
+        ? " — check GATEWAY_DASHBOARD_TOKEN is a valid dash_... token"
+        : "";
+    throw new Error(`Gateway returned ${res.status} for ${path}${hint}`);
   }
 
   return (await res.json()) as T;
@@ -65,16 +72,17 @@ export interface DashboardData {
   topCached: TopCachedEntry[];
 }
 
-export async function fetchDashboardData(
-  tenantId: number,
-  signal?: AbortSignal,
-): Promise<DashboardData> {
-  const query = `?tenant_id=${encodeURIComponent(tenantId)}`;
-
+/**
+ * There is no tenant parameter: the gateway derives the tenant from the dashboard
+ * token, so a deployment shows exactly the one tenant its token belongs to. To look
+ * at a different tenant, change GATEWAY_DASHBOARD_TOKEN — which is the point, since
+ * the old `?tenant_id=` let anyone read any tenant's numbers.
+ */
+export async function fetchDashboardData(signal?: AbortSignal): Promise<DashboardData> {
   const [stats, trend, topCached] = await Promise.all([
-    getJson<Stats>(`/v1/stats${query}`, signal),
-    getJson<{ trend: TrendPoint[] }>(`/v1/stats/trend${query}`, signal),
-    getJson<{ entries: TopCachedEntry[] }>(`/v1/stats/top-cached${query}`, signal),
+    getJson<Stats>("/v1/stats", signal),
+    getJson<{ trend: TrendPoint[] }>("/v1/stats/trend", signal),
+    getJson<{ entries: TopCachedEntry[] }>("/v1/stats/top-cached", signal),
   ]);
 
   return { stats, trend: trend.trend ?? [], topCached: topCached.entries ?? [] };

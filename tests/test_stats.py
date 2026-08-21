@@ -1,6 +1,7 @@
 import asyncio
+from uuid import uuid4
 
-import app.routes.proxy as proxy_module
+import app.routes.stats as stats_module
 
 
 class FakeAcquire:
@@ -30,6 +31,20 @@ class FakeStatsConn:
         return self.rows
 
 
+def dashboard_tenant(tenant_id, tenant_uuid=None):
+    """What app.auth.require_dashboard_key() hands the route once the token resolves.
+
+    The routes take this dict, never a caller-supplied tenant_id — that is the
+    whole point of Task 2, so the tests call them the same way the app does.
+    """
+    return {
+        "tenant_id": tenant_id,
+        "tenant_uuid": tenant_uuid or uuid4(),
+        "name": f"tenant-{tenant_id}",
+        "scope": "dashboard",
+    }
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -41,9 +56,9 @@ def test_get_stats_aggregates_by_cache_status(monkeypatch):
         {"cache_status": "MISS", "count": 2, "avg_latency_ms": 500.0, "prompt_tokens": 40, "completion_tokens": 20},
         {"cache_status": "UNCACHEABLE", "count": 1, "avg_latency_ms": 300.0, "prompt_tokens": 10, "completion_tokens": 5},
     ]
-    monkeypatch.setattr(proxy_module.db, "pool", FakePool(FakeStatsConn(rows)))
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(FakeStatsConn(rows)))
 
-    stats = run(proxy_module.get_stats(tenant_id=1))
+    stats = run(stats_module.get_stats(tenant=dashboard_tenant(1)))
 
     assert stats["total_requests"] == 11
     assert stats["exact_hit_count"] == 5
@@ -57,9 +72,9 @@ def test_get_stats_aggregates_by_cache_status(monkeypatch):
 
 
 def test_get_stats_with_no_requests(monkeypatch):
-    monkeypatch.setattr(proxy_module.db, "pool", FakePool(FakeStatsConn([])))
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(FakeStatsConn([])))
 
-    stats = run(proxy_module.get_stats(tenant_id=42))
+    stats = run(stats_module.get_stats(tenant=dashboard_tenant(42)))
 
     assert stats["total_requests"] == 0
     assert stats["hit_rate"] == 0.0
