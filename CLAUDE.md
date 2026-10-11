@@ -77,7 +77,11 @@ npm --prefix dashboard run dev       # dashboard :3000
 
 - **Entity matching is exact.** `has_entity_mismatch()` extracts numbers, version
   tokens (`v2` = `V2` = the `2` in "version 2") and capitalised words that don't
-  open a sentence (minus `I` and a stopword list of question/function words). Two
+  open a sentence (minus `I` and a stopword list of question/function words; not
+  `may`/`will`, which capitalised are a month or a name). An **all-caps token of
+  two or more letters is always an entity** (US, IT, WHO), even sentence-initial
+  or on the stopword list, unless the whole question is upper case
+  ("WHAT IS PGVECTOR" still matches "what is pgvector"). Two
   queries that both name entities must name the *same set*: "Delhi in July" vs
   "Mumbai in July" is refused, and so is "Docker" vs "Docker on Ubuntu". A query
   naming no entities is not compared. Trade-off: correctness over hit rate, so a
