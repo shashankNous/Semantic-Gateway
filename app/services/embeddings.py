@@ -19,6 +19,16 @@ DEFAULT_EMBEDDING_DIM = 1536
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM)))
 
 
+class EmbeddingUnavailableError(Exception):
+    """No embedding could be produced for this request, for any reason.
+
+    One type for every failure (unreachable endpoint, timeout, HTTP error such as
+    Ollama's 404 for an unknown model, malformed response, missing key), so the
+    proxy can degrade to a plain miss without knowing which provider is behind
+    this. Messages name the failure and the model; never the key or the input.
+    """
+
+
 async def embed_text(text: str) -> list[float]:
     if EMBEDDING_PROVIDER == "openai":
         return await _embed_with_openai(text)
@@ -31,21 +41,49 @@ async def _embed_with_openai(text: str) -> list[float]:
     # it falls back to OPENAI_API_KEY as before.
     api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            OPENAI_EMBEDDINGS_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": EMBEDDING_MODEL,
-                "input": text,
-            },
+        raise EmbeddingUnavailableError(
+            "No embedding API key configured (EMBEDDING_API_KEY or OPENAI_API_KEY)"
         )
-        response.raise_for_status()
 
-    data: dict[str, Any] = response.json()
-    return data["data"][0]["embedding"]
+    # httpx.HTTPError covers connection errors, timeouts and, via
+    # raise_for_status(), non-2xx responses. asyncio.CancelledError is not an
+    # httpx error and propagates untouched.
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                OPENAI_EMBEDDINGS_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": EMBEDDING_MODEL,
+                    "input": text,
+                },
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise EmbeddingUnavailableError(
+            f"Embedding endpoint returned HTTP {exc.response.status_code} "
+            f"for model {EMBEDDING_MODEL!r}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise EmbeddingUnavailableError(
+            f"Embedding request failed ({type(exc).__name__}) for model {EMBEDDING_MODEL!r}"
+        ) from exc
+
+    try:
+        data: dict[str, Any] = response.json()
+        embedding = data["data"][0]["embedding"]
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise EmbeddingUnavailableError(
+            f"Malformed embedding response ({type(exc).__name__}) for model {EMBEDDING_MODEL!r}"
+        ) from exc
+
+    if not isinstance(embedding, list):
+        raise EmbeddingUnavailableError(
+            f"Malformed embedding response (embedding is {type(embedding).__name__}, "
+            f"not a list) for model {EMBEDDING_MODEL!r}"
+        )
+
+    return embedding

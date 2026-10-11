@@ -1,25 +1,33 @@
+import logging
 import os
 import time
 
 import httpx
 
-from dotenv import load_dotenv
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 
+from app.env import load_env
 from app.auth import verify_api_key
 from app.services.logging import log_api_request
 from app.cache_key import build_cache_key
 from app.services.cache import get_cached_response, set_cached_response
 from app.services.rate_limit import enforce_rate_limit
 from app.services.semantic_cache import find_semantic_match, store_semantic_cache_entry
-from app.services.embeddings import embed_text
+from app.services.embeddings import EmbeddingUnavailableError, embed_text
 from app.services.normalization import normalize_query
 from app.services.cacheability import is_cacheable
 
-load_dotenv()
+load_env()
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
+
+#: Set on a response answered without the semantic cache because no embedding
+#: could be produced. X-Cache stays MISS, so existing stats keep counting it.
+DEGRADED_HEADER = "X-Cache-Degraded"
+EMBEDDING_UNAVAILABLE = "embedding-unavailable"
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 UPSTREAM_BASE_URL = os.getenv("UPSTREAM_BASE_URL", "https://api.mistral.ai/v1").rstrip("/")
@@ -112,6 +120,7 @@ async def proxy(request: Request):
     cacheable = is_request_cacheable(body) and is_cacheable(normalized_query)
 
     embedding = None
+    degraded = False
 
     if cacheable:
         # 3. Check Redis exact-match cache
@@ -136,14 +145,26 @@ async def proxy(request: Request):
                 headers={"X-Cache": "EXACT_HIT"},
             )
 
-        # 4. Check semantic cache
-        embedding = await embed_text(normalized_query)
-        semantic_match = await find_semantic_match(
-            tenant_uuid,
-            embedding,
-            normalized_query,
-            raw_query=raw_query,
-        )
+        # 4. Check semantic cache. Without an embedding there is nothing to look up,
+        # so degrade to a plain miss rather than fail a request upstream can answer.
+        try:
+            embedding = await embed_text(normalized_query)
+        except EmbeddingUnavailableError as exc:
+            degraded = True
+            logger.warning(
+                "Semantic cache skipped, answering as a miss: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
+        semantic_match = None
+        if embedding is not None:
+            semantic_match = await find_semantic_match(
+                tenant_uuid,
+                embedding,
+                normalized_query,
+                raw_query=raw_query,
+            )
 
         if semantic_match is not None:
             latency_ms = int((time.perf_counter() - start) * 1000)
@@ -176,16 +197,18 @@ async def proxy(request: Request):
     # 6. Cache successful response and log to Postgres
     if status_code == 200:
         if cacheable:
+            # The exact cache needs no embedding, so it is written even when degraded.
             await set_cached_response(cache_key, content)
-            await store_semantic_cache_entry(
-                tenant_uuid,
-                normalized_query,
-                cache_key,
-                content,
-                embedding,
-                model,
-                raw_query=raw_query,
-            )
+            if embedding is not None:
+                await store_semantic_cache_entry(
+                    tenant_uuid,
+                    normalized_query,
+                    cache_key,
+                    content,
+                    embedding,
+                    model,
+                    raw_query=raw_query,
+                )
 
         await log_request_result(
             tenant_id=tenant_id,
@@ -196,8 +219,12 @@ async def proxy(request: Request):
             cache_status=cache_status,
         )
 
+    headers = {"X-Cache": cache_status}
+    if degraded:
+        headers[DEGRADED_HEADER] = EMBEDDING_UNAVAILABLE
+
     return JSONResponse(
         content=content,
         status_code=status_code,
-        headers={"X-Cache": cache_status},
+        headers=headers,
     )

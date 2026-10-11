@@ -8,13 +8,13 @@ was, any caller could read any tenant's numbers by changing an integer.
 import os
 from datetime import datetime
 
-from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.env import load_env
 import app.db as db
 from app.auth import require_dashboard_key
 
-load_dotenv()
+load_env()
 
 router = APIRouter()
 

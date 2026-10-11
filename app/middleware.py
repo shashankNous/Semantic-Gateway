@@ -9,13 +9,13 @@ no CORS headers at all.
 import logging
 import os
 
-from dotenv import load_dotenv
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
+from app.env import load_env
 import app.db as db
 
-load_dotenv()
+load_env()
 
 logger = logging.getLogger(__name__)
 

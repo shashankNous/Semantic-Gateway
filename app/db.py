@@ -2,13 +2,16 @@ import os
 import asyncio
 import logging
 
-from dotenv import load_dotenv
 import asyncpg
 
-from app.security import SCOPE_DASHBOARD, SCOPE_PROXY, hash_token
-from app.services.embeddings import EMBEDDING_DIM
+from app.env import load_env
 
-load_dotenv()
+# Before the app imports below: app.services.embeddings reads its settings at
+# import time, and this module is the first to load .env.
+load_env()
+
+from app.security import SCOPE_DASHBOARD, SCOPE_PROXY, hash_token  # noqa: E402
+from app.services.embeddings import EMBEDDING_DIM  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
