@@ -330,3 +330,99 @@ def test_an_invalid_timeout_fails_at_startup(raw):
     assert "EMBEDDING_TIMEOUT_SECONDS" in result.stderr
     assert repr(raw) in result.stderr
 
+
+
+# --- Presets: the native width is checked, then the vector is padded -------------
+
+
+def use_preset(monkeypatch, **env):
+    """Resolve settings as import would, under `env`, and apply them to the module."""
+    import os
+
+    for key in ("EMBEDDING_PROVIDER", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL", "EMBEDDING_DIM",
+                "EMBEDDING_NATIVE_DIM", "EMBEDDING_API_KEY", "MISTRAL_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    for name, value in embeddings.resolve_embedding_config(os.environ).items():
+        monkeypatch.setattr(embeddings, name, value)
+
+
+@pytest.fixture
+def recording_transport(monkeypatch):
+    """Like embedding_transport, but records what the request looked like."""
+    seen = {}
+    real_client = httpx.AsyncClient
+
+    def install(vector):
+        def handler(request):
+            seen["url"] = str(request.url)
+            seen["authorization"] = request.headers["Authorization"]
+            seen["model"] = json.loads(request.content)["model"]
+            return httpx.Response(200, json=embedding_body(vector))
+
+        def client(*args, **kwargs):
+            return real_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+        monkeypatch.setattr(embeddings.httpx, "AsyncClient", client)
+        return seen
+
+    return install
+
+
+def test_a_1024_wide_mistral_embedding_is_accepted_and_padded(monkeypatch, recording_transport):
+    """The case a careless merge breaks: checked against 1536, every call would fail."""
+    use_preset(monkeypatch, EMBEDDING_PROVIDER="mistral", MISTRAL_API_KEY="test-mistral-key")
+    seen = recording_transport([0.5] * 1024)
+
+    result = run(embed_text("how do i pay"))
+
+    assert seen == {
+        "url": "https://api.mistral.ai/v1/embeddings",
+        "authorization": "Bearer test-mistral-key",
+        "model": "mistral-embed",
+    }
+    assert len(result) == 1536
+    assert result[:1024] == [0.5] * 1024
+    assert result[1024:] == [0.0] * 512
+
+
+def test_a_1536_wide_response_from_the_mistral_preset_is_the_wrong_size(monkeypatch,
+                                                                        recording_transport):
+    use_preset(monkeypatch, EMBEDDING_PROVIDER="mistral", MISTRAL_API_KEY="test-mistral-key")
+    recording_transport([0.5] * 1536)
+
+    with pytest.raises(EmbeddingUnavailableError) as excinfo:
+        run(embed_text("how do i pay"))
+
+    message = str(excinfo.value)
+    assert "expected 1024" in message
+    assert "got 1536" in message
+    assert "mistral-embed" in message
+
+
+def test_a_wrong_size_mistral_response_degrades_the_request(monkeypatch, recording_transport,
+                                                            degraded_route):
+    use_preset(monkeypatch, EMBEDDING_PROVIDER="mistral", MISTRAL_API_KEY="test-mistral-key")
+    recording_transport([0.5] * 1536)
+    monkeypatch.setattr(proxy_module, "embed_text", embed_text)
+
+    response = run(proxy_module.proxy(FakeRequest(chat_body("What is pgvector?"))))
+
+    assert response.status_code == 200
+    assert response.headers["X-Cache"] == "MISS"
+    assert response.headers["X-Cache-Degraded"] == "embedding-unavailable"
+    assert degraded_route["semantic_writes"] == []
+
+
+def test_a_missing_mistral_key_is_a_named_configuration_error_not_a_500(monkeypatch,
+                                                                        degraded_route, caplog):
+    use_preset(monkeypatch, EMBEDDING_PROVIDER="mistral")
+    monkeypatch.setattr(proxy_module, "embed_text", embed_text)
+
+    with caplog.at_level("WARNING", logger=proxy_module.__name__):
+        response = run(proxy_module.proxy(FakeRequest(chat_body("What is pgvector?"))))
+
+    assert response.status_code == 200
+    assert response.headers["X-Cache-Degraded"] == "embedding-unavailable"
+    assert "MISTRAL_API_KEY is not configured" in caplog.text

@@ -24,6 +24,8 @@ PROVIDER_VARS = (
     "EMBEDDING_API_KEY",
     "EMBEDDING_MODEL",
     "EMBEDDING_DIM",
+    "EMBEDDING_NATIVE_DIM",
+    "EMBEDDING_DIMS",
     "EMBEDDING_TIMEOUT_SECONDS",
     "UPSTREAM_BASE_URL",
     "UPSTREAM_MODEL",
@@ -37,9 +39,11 @@ from app.services import embeddings, semantic_cache
 from app.routes import proxy
 print(json.dumps({
     "embedding_provider": embeddings.EMBEDDING_PROVIDER,
-    "embedding_url": embeddings.OPENAI_EMBEDDINGS_URL,
+    "embedding_url": embeddings.EMBEDDINGS_URL,
+    "embedding_key_var": embeddings.EMBEDDING_API_KEY_VAR,
     "embedding_model": embeddings.EMBEDDING_MODEL,
     "embedding_dim": embeddings.EMBEDDING_DIM,
+    "embedding_native_dim": embeddings.EMBEDDING_NATIVE_DIM,
     "embedding_timeout": embeddings.EMBEDDING_TIMEOUT_SECONDS,
     "completion_url": proxy.MISTRAL_BASE_URL,
     "completion_model": proxy.UPSTREAM_MODEL,
@@ -67,8 +71,10 @@ def test_no_provider_variables_means_production_providers():
     assert resolved_config() == {
         "embedding_provider": "openai",
         "embedding_url": "https://api.openai.com/v1/embeddings",
+        "embedding_key_var": "OPENAI_API_KEY",
         "embedding_model": "text-embedding-3-small",
         "embedding_dim": 1536,
+        "embedding_native_dim": 1536,
         # Deliberately lowered from the old hardcoded 30s: a hung embedding service
         # delays every exact-cache miss by this much before degrading to upstream.
         "embedding_timeout": 10.0,
@@ -91,6 +97,7 @@ def test_the_local_variables_redirect_both_providers():
 
     assert config["embedding_url"] == "http://localhost:11434/v1/embeddings"
     assert config["embedding_dim"] == 768
+    assert config["embedding_native_dim"] == 768
     assert config["embedding_timeout"] == 45.0
     assert config["completion_url"] == "http://localhost:11434/v1/chat/completions"
     assert config["completion_model"] == "phi3"
