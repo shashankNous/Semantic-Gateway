@@ -52,6 +52,9 @@ npm --prefix dashboard run dev       # dashboard :3000
   stats CORS/access log, migrations 005-006. Pushed, not yet merged.
 - `local-model-testing`: branched from 3.5; adds the Ollama local-testing setup.
   Local only.
+- `fix-verification-and-embedding-failures`: branched from `local-model-testing`;
+  exact entity matching, embedding-failure degradation, single-path `.env`
+  loading, per-request embedding size check. Local only.
 
 ## Project rules
 
@@ -68,6 +71,27 @@ npm --prefix dashboard run dev       # dashboard :3000
   is an environment variable; with none set, the code resolves to production
   (pinned by `tests/test_provider_defaults.py`).
 - Never point local tooling at the Railway database or any remote service.
+
+## Behaviour worth knowing
+
+- **Entity matching is exact.** `has_entity_mismatch()` extracts numbers, version
+  tokens (`v2` = `V2` = the `2` in "version 2") and capitalised words that don't
+  open a sentence (minus `I` and a stopword list of question/function words). Two
+  queries that both name entities must name the *same set*: "Delhi in July" vs
+  "Mumbai in July" is refused, and so is "Docker" vs "Docker on Ubuntu". A query
+  naming no entities is not compared. Trade-off: correctness over hit rate, so a
+  valid paraphrase that adds or drops a proper noun is a miss.
+- **Embedding failures degrade, they don't fail.** Any failure in `embed_text()`
+  (unreachable, timeout, HTTP error, malformed response, wrong vector length,
+  missing key) raises `EmbeddingUnavailableError`. The proxy logs one warning,
+  skips the semantic cache, calls upstream, writes the Redis exact cache but no
+  `cache_entries` row, logs `MISS`, and adds `X-Cache-Degraded:
+  embedding-unavailable`. Exact hits are unaffected. The embedding call times out
+  after 30s.
+- **`.env` comes from one path.** `app/env.py:load_env()` reads `ENV_FILE` if set,
+  else `<project root>/.env` (root from the file's own location), never searches
+  parent folders, and never overrides real environment variables. Don't call
+  `load_dotenv()` directly in `app/`; a test enforces this.
 
 ## Local testing with Ollama
 
@@ -100,10 +124,9 @@ How it fits together:
   so production SQL is unchanged. The app refuses to start if
   `cache_entries.embedding` does not match `EMBEDDING_DIM`. Changing the dimension
   needs a fresh database (`local_setup.py` always makes one).
-- **Only `.env.local` is read.** The app's `load_dotenv()` walks up from `app/` and,
-  from a worktree, finds the main checkout's `.env`. The local scripts set
-  `PYTHON_DOTENV_DISABLED=1` and refuse any non-localhost URL. Always start the
-  local gateway through `run_local_gateway.py`, never plain uvicorn.
+- **Only `.env.local` is read.** The local scripts set `PYTHON_DOTENV_DISABLED=1`,
+  which also switches off `app/env.py`, and refuse any non-localhost URL. Always
+  start the local gateway through `run_local_gateway.py`, never plain uvicorn.
 - **Ports:** Postgres 55432, Redis 56379, gateway 8010 (8011 for the smoke test's
   broken-embedding gateway). If the gateway itself runs in Docker, use
   `http://host.docker.internal:11434/v1` for both base URLs.
@@ -115,10 +138,6 @@ How it fits together:
 - **phi3 misses take about 10-15s** each (`max_tokens=60`); a full smoke run is a
   few minutes.
 
-Known behaviour the smoke test records rather than fixes:
-
-- An embedding failure (wrong model name, Ollama down) is an unhandled 500 from
-  `embed_text()` in `proxy.py`, with no fallback to upstream.
-- Entity verification treats two queries as different only when they share *no*
-  capitalised word or number, so "Delhi in July" vs "Mumbai in July" and "v2 of the
-  API" vs "v3 of the API" are served from each other's cache.
+What the smoke test checks beyond the cache basics: verification refusing
+near-miss and shared-entity pairs (with the verifier's reason), the rate limiter
+failing closed with Redis down, and a broken embedding model degrading to a miss.

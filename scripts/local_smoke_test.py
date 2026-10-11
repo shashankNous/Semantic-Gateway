@@ -9,8 +9,7 @@ URLs, and clears the local cache tables and Redis at the start so it can be re-r
 Every request uses temperature=0 (anything else is uncacheable) and the cache
 outcome is read from the gateway's `X-Cache` response header.
 
-Prints one PASS/FAIL line per check, RECORDED for behaviour that is captured
-rather than asserted, and GAP for known weaknesses it probes. Exits 1 on any FAIL.
+Prints one PASS/FAIL line per check. Exits 1 on any FAIL.
 
 Case 8 stops and restarts the local Redis container. Case 9 starts a second
 gateway on another port with a deliberately wrong embedding model.
@@ -41,6 +40,11 @@ import asyncpg  # noqa: E402
 import httpx  # noqa: E402
 from redis import Redis  # noqa: E402
 
+from app.services.match_verification import (  # noqa: E402
+    _extract_entities,
+    has_entity_mismatch,
+    has_polarity_mismatch,
+)
 from app.services.normalization import normalize_query  # noqa: E402
 
 GATEWAY = f"http://127.0.0.1:{env.get('LOCAL_GATEWAY_PORT', '8010')}"
@@ -152,6 +156,20 @@ def wait_for_redis(seconds: float) -> bool:
     return False
 
 
+def verifier_reason(query: str, candidate: str) -> str:
+    """Why match verification refuses (or accepts) a pair, in its own terms.
+
+    Same functions, same raw text the gateway verifies, so this is the reason the
+    gateway logs as "Skipped unsafe semantic match (...)".
+    """
+    if has_polarity_mismatch(query, candidate):
+        return "verifier: polarity mismatch"
+    if has_entity_mismatch(query, candidate):
+        return (f"verifier: entity mismatch {sorted(_extract_entities(candidate))} "
+                f"vs {sorted(_extract_entities(query))}")
+    return "verifier: accepted"
+
+
 # --- Cases -------------------------------------------------------------------
 
 
@@ -169,21 +187,24 @@ def near_miss_pair(client, key, first: str, second: str, label: str) -> None:
         layer = f"under threshold {THRESHOLD}, so verification was NOT exercised"
     similarities.append((f"rejected: {label}", score, "MISS" if cache == "MISS" else cache))
     check(status == 200 and cache == "MISS", f"5. {label}: not served from cache",
-          f"{second!r} -> {status} {cache}; similarity {score:.4f}, {layer}")
+          f"{second!r} -> {status} {cache}; similarity {score:.4f}, {layer}; "
+          f"{verifier_reason(second, first)}")
 
 
-def gap_probe(client, key, first: str, second: str, label: str) -> None:
-    """Known weakness: entities count as different only if *no* entity is shared."""
+def shared_entity_pair(client, key, first: str, second: str, label: str) -> None:
+    """Pairs that share one entity but differ in another ("July", "API").
+
+    The old any-overlap entity rule served these from each other's cache; the
+    sets must now match exactly.
+    """
     chat(client, key, first)
     score = similarity(first, second)
     status, cache, _, _ = chat(client, key, second)
-    similarities.append((f"gap probe: {label}", score, cache))
-    if cache == "SEMANTIC_HIT":
-        record("GAP", f"10b. {label}: served from cache (wrong answer)",
-               f"{second!r} reused {first!r}; similarity {score:.4f}")
-    else:
-        record("GAP-OK", f"10b. {label}: not served from cache",
-               f"{second!r} -> {status} {cache}; similarity {score:.4f}")
+    similarities.append((f"shared entity: {label}", score, cache))
+    check(status == 200 and cache != "SEMANTIC_HIT",
+          f"10b. {label}: not served from cache",
+          f"{second!r} -> {status} {cache}; similarity {score:.4f}; "
+          f"{verifier_reason(second, first)}")
 
 
 def redis_outage(client, key) -> None:
@@ -203,7 +224,11 @@ def redis_outage(client, key) -> None:
 
 
 def broken_embeddings(client, key) -> None:
-    """Records today's behaviour when embed_text() fails. Deliberately not fixed."""
+    """A failing embedding service degrades requests to a miss instead of a 500."""
+    # 9b needs this prompt in the exact cache; put it there through the working
+    # gateway (Redis was restarted in case 8).
+    chat(client, key, "What is pgvector?")
+
     base = f"http://127.0.0.1:{BROKEN_GATEWAY_PORT}"
     log_path = REPO / ".local-broken-gateway.log"
     with log_path.open("w", encoding="utf-8") as log:
@@ -224,19 +249,26 @@ def broken_embeddings(client, key) -> None:
             record("FAIL", "9. Broken-embedding gateway started", f"see {log_path.name}")
             return
 
-        status, cache, response, elapsed = chat(
-            client, key, "What is HNSW indexing in pgvector?", base=base
-        )
+        prompt = "What is HNSW indexing in pgvector?"
+        status, cache, response, elapsed = chat(client, key, prompt, base=base)
+        degraded = response.headers.get("X-Cache-Degraded")
+        stored = sql("SELECT count(*) FROM cache_entries WHERE normalized_query = $1",
+                     normalize_query(prompt))
         time.sleep(0.5)
         log_text = log_path.read_text(encoding="utf-8", errors="replace")
-        error_lines = [line for line in log_text.splitlines() if "Error" in line]
-        cause = error_lines[-1].strip() if error_lines else "no exception logged"
-        record("RECORDED", "9. Embedding failure (wrong model name)",
-               f"-> HTTP {status}, X-Cache={cache}, body={response.text[:80]!r}, "
-               f"{elapsed:.1f}s; server log: {cause[:160]}")
-        if status == 500:
-            print("           matches the expected current behaviour: unhandled 500, "
-                  "no fallback to upstream", flush=True)
+        warnings = [line for line in log_text.splitlines() if "Semantic cache skipped" in line]
+        cause = warnings[-1].strip() if warnings else "no degradation warning logged"
+        check(status == 200 and cache == "MISS" and degraded == "embedding-unavailable"
+              and stored == 0,
+              "9. Embedding failure (wrong model name): degraded miss",
+              f"-> HTTP {status}, X-Cache={cache}, X-Cache-Degraded={degraded}, "
+              f"cache_entries rows: {stored}, {elapsed:.1f}s; server log: {cause[:170]}")
+
+        status, cache, response, _ = chat(client, key, "What is pgvector?", base=base)
+        check(status == 200 and cache == "EXACT_HIT",
+              "9b. Embedding failure: exact cache still answers",
+              f"-> HTTP {status}, X-Cache={cache}, "
+              f"X-Cache-Degraded={response.headers.get('X-Cache-Degraded')}")
     finally:
         process.terminate()
         process.wait(timeout=15)
@@ -323,11 +355,13 @@ def main() -> int:
         # 9. Embedding failure
         broken_embeddings(client, tenant_a["proxy_key"])
 
-        # 10b. Known verification gaps, on their own tenant
-        gap_probe(client, tenant_c["proxy_key"], "What is the weather like in Delhi in July?",
-                  "What is the weather like in Mumbai in July?", "Delhi vs Mumbai, shared 'July'")
-        gap_probe(client, tenant_c["proxy_key"], "Should I use v2 of the API?",
-                  "Should I use v3 of the API?", "v2 vs v3, shared 'API'")
+        # 10b. Pairs sharing one entity, on their own tenant
+        shared_entity_pair(client, tenant_c["proxy_key"],
+                           "What is the weather like in Delhi in July?",
+                           "What is the weather like in Mumbai in July?",
+                           "Delhi vs Mumbai, shared 'July'")
+        shared_entity_pair(client, tenant_c["proxy_key"], "Should I use v2 of the API?",
+                           "Should I use v3 of the API?", "v2 vs v3, shared 'API'")
 
     # 10. Score distribution
     print(f"\n10. Similarity scores (threshold {THRESHOLD}):")
@@ -336,9 +370,8 @@ def main() -> int:
         print(f"    {score:.4f} {side} threshold  {cache or '-':13} {label}")
 
     failed = [r for r in results if r[0] == "FAIL"]
-    gaps = [r for r in results if r[0] == "GAP"]
     passed = [r for r in results if r[0] == "PASS"]
-    print(f"\n{len(passed)} passed, {len(failed)} failed, {len(gaps)} known gap(s) reproduced")
+    print(f"\n{len(passed)} passed, {len(failed)} failed")
     return 1 if failed else 0
 
 
