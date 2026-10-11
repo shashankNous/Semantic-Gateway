@@ -1,3 +1,4 @@
+import math
 import os
 from typing import Any
 
@@ -17,6 +18,30 @@ OPENAI_EMBEDDINGS_URL = f"{EMBEDDING_BASE_URL}/embeddings"
 #: database agrees at startup.
 DEFAULT_EMBEDDING_DIM = 1536
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM)))
+
+
+def parse_timeout_seconds(raw: str) -> float:
+    """EMBEDDING_TIMEOUT_SECONDS as a finite number of seconds greater than zero."""
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+
+    if not math.isfinite(value) or value <= 0:
+        # Refuse to guess, as RATE_LIMIT_FAIL_MODE does: a typo silently becoming
+        # a default would pick a behaviour the operator did not ask for.
+        raise RuntimeError(
+            f"EMBEDDING_TIMEOUT_SECONDS must be a number of seconds greater than 0, "
+            f"got {raw!r}"
+        )
+    return value
+
+
+#: How long one embedding call may take before the request degrades to a plain
+#: miss (see EmbeddingUnavailableError). Every exact-cache miss waits this long
+#: when the embedding service hangs, so it is kept short; the first call to a
+#: local Ollama model needs more while the model loads (.env.local.example).
+EMBEDDING_TIMEOUT_SECONDS = parse_timeout_seconds(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "10"))
 
 
 class EmbeddingUnavailableError(Exception):
@@ -49,7 +74,7 @@ async def _embed_with_openai(text: str) -> list[float]:
     # raise_for_status(), non-2xx responses. asyncio.CancelledError is not an
     # httpx error and propagates untouched.
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=EMBEDDING_TIMEOUT_SECONDS) as client:
             response = await client.post(
                 OPENAI_EMBEDDINGS_URL,
                 headers={

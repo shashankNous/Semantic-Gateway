@@ -67,7 +67,8 @@ npm --prefix dashboard run dev       # dashboard :3000
   breaks every existing key. Never run it in a retry loop or unattended, and never
   against anything but a local test database without an explicit decision.
 - **Production defaults do not change:** OpenAI embeddings at 1536 dimensions,
-  Mistral completions, similarity threshold 0.92. Every local-testing difference
+  Mistral completions, similarity threshold 0.92. (The one deliberate exception:
+  the embedding timeout went from 30s to a configurable 10s.) Every local-testing difference
   is an environment variable; with none set, the code resolves to production
   (pinned by `tests/test_provider_defaults.py`).
 - Never point local tooling at the Railway database or any remote service.
@@ -86,8 +87,12 @@ npm --prefix dashboard run dev       # dashboard :3000
   missing key) raises `EmbeddingUnavailableError`. The proxy logs one warning,
   skips the semantic cache, calls upstream, writes the Redis exact cache but no
   `cache_entries` row, logs `MISS`, and adds `X-Cache-Degraded:
-  embedding-unavailable`. Exact hits are unaffected. The embedding call times out
-  after 30s.
+  embedding-unavailable`. Exact hits are unaffected.
+- **Embedding timeout: `EMBEDDING_TIMEOUT_SECONDS`, default 10.** This *is* a
+  changed production default (it was a hardcoded 30s): a hung embedding service
+  delays every exact-cache miss by the full timeout before degrading, so it is kept
+  short. Must be a finite number greater than 0, or the app refuses to start.
+  `.env.local` uses 60, because the first Ollama call loads the model.
 - **`.env` comes from one path.** `app/env.py:load_env()` reads `ENV_FILE` if set,
   else `<project root>/.env` (root from the file's own location), never searches
   parent folders, and never overrides real environment variables. Don't call

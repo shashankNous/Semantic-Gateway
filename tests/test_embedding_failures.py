@@ -270,3 +270,63 @@ def test_a_wrong_length_embedding_degrades_the_request(degraded_route, embedding
     assert response.headers["X-Cache-Degraded"] == "embedding-unavailable"
     assert degraded_route["semantic_lookups"] == 0
     assert degraded_route["semantic_writes"] == []
+
+
+# --- Item 1: EMBEDDING_TIMEOUT_SECONDS -------------------------------------------
+
+
+def test_the_client_uses_the_configured_timeout(monkeypatch):
+    """The value read at import (default 10s, see test_provider_defaults) reaches httpx."""
+    monkeypatch.setenv("EMBEDDING_API_KEY", "test-embedding-key")
+    seen = {}
+    real_client = httpx.AsyncClient
+
+    def client(*args, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        vector = [0.1] * embeddings.EMBEDDING_DIM
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json=embedding_body(vector)))
+        return real_client(*args, transport=transport, **kwargs)
+
+    monkeypatch.setattr(embeddings.httpx, "AsyncClient", client)
+    monkeypatch.setattr(embeddings, "EMBEDDING_TIMEOUT_SECONDS", 45.0)
+
+    run(embed_text("hello"))
+
+    assert seen["timeout"] == 45.0
+
+
+@pytest.mark.parametrize("raw, expected", [("10", 10.0), ("45", 45.0), ("2.5", 2.5)])
+def test_valid_timeouts_parse(raw, expected):
+    assert embeddings.parse_timeout_seconds(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "abc", "", "nan", "inf"])
+def test_invalid_timeouts_are_rejected_naming_the_variable(raw):
+    with pytest.raises(RuntimeError) as excinfo:
+        embeddings.parse_timeout_seconds(raw)
+
+    assert "EMBEDDING_TIMEOUT_SECONDS" in str(excinfo.value)
+    assert repr(raw) in str(excinfo.value)
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "abc"])
+def test_an_invalid_timeout_fails_at_startup(raw):
+    """Read at import, so a bad value stops the app before it serves a request."""
+    import os
+    import pathlib
+    import subprocess
+    import sys
+
+    env = dict(os.environ, EMBEDDING_TIMEOUT_SECONDS=raw, PYTHON_DOTENV_DISABLED="1")
+    result = subprocess.run(
+        [sys.executable, "-c", "import app.main"],
+        cwd=pathlib.Path(__file__).resolve().parent.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "EMBEDDING_TIMEOUT_SECONDS" in result.stderr
+    assert repr(raw) in result.stderr
+

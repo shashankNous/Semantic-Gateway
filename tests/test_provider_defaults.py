@@ -24,6 +24,7 @@ PROVIDER_VARS = (
     "EMBEDDING_API_KEY",
     "EMBEDDING_MODEL",
     "EMBEDDING_DIM",
+    "EMBEDDING_TIMEOUT_SECONDS",
     "UPSTREAM_BASE_URL",
     "UPSTREAM_MODEL",
     "MISTRAL_BASE_URL",
@@ -39,6 +40,7 @@ print(json.dumps({
     "embedding_url": embeddings.OPENAI_EMBEDDINGS_URL,
     "embedding_model": embeddings.EMBEDDING_MODEL,
     "embedding_dim": embeddings.EMBEDDING_DIM,
+    "embedding_timeout": embeddings.EMBEDDING_TIMEOUT_SECONDS,
     "completion_url": proxy.MISTRAL_BASE_URL,
     "completion_model": proxy.UPSTREAM_MODEL,
     "threshold": semantic_cache.DEFAULT_THRESHOLD,
@@ -67,6 +69,9 @@ def test_no_provider_variables_means_production_providers():
         "embedding_url": "https://api.openai.com/v1/embeddings",
         "embedding_model": "text-embedding-3-small",
         "embedding_dim": 1536,
+        # Deliberately lowered from the old hardcoded 30s: a hung embedding service
+        # delays every exact-cache miss by this much before degrading to upstream.
+        "embedding_timeout": 10.0,
         "completion_url": "https://api.mistral.ai/v1/chat/completions",
         "completion_model": "mistral-small-latest",
         "threshold": 0.92,
@@ -78,6 +83,7 @@ def test_the_local_variables_redirect_both_providers():
         EMBEDDING_BASE_URL="http://localhost:11434/v1/",
         EMBEDDING_MODEL="nomic-embed-text",
         EMBEDDING_DIM="768",
+        EMBEDDING_TIMEOUT_SECONDS="45",
         UPSTREAM_BASE_URL="http://localhost:11434/v1",
         UPSTREAM_MODEL="phi3",
         SEMANTIC_CACHE_THRESHOLD="0.85",
@@ -85,6 +91,7 @@ def test_the_local_variables_redirect_both_providers():
 
     assert config["embedding_url"] == "http://localhost:11434/v1/embeddings"
     assert config["embedding_dim"] == 768
+    assert config["embedding_timeout"] == 45.0
     assert config["completion_url"] == "http://localhost:11434/v1/chat/completions"
     assert config["completion_model"] == "phi3"
     assert config["threshold"] == 0.85
