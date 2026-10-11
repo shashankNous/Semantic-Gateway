@@ -22,7 +22,11 @@ from urllib.parse import urlparse
 from dotenv import dotenv_values
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-ENV_FILE = REPO / ".env.local"
+#: Default env file. LOCAL_ENV_FILE (relative to the repo) picks another, e.g. the
+#: padding configuration in .env.local.padded. Set in the environment, it is
+#: inherited by every subprocess, so the setup, the gateway and the smoke test's
+#: second gateway all read the same file.
+DEFAULT_ENV_FILE = ".env.local"
 CREDENTIALS_FILE = REPO / ".local-credentials.json"
 COMPOSE_FILE = REPO / "docker-compose.local.yml"
 
@@ -33,11 +37,16 @@ URL_VARS = ("DATABASE_URL", "REDIS_URL", "EMBEDDING_BASE_URL", "UPSTREAM_BASE_UR
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "host.docker.internal"})
 
 
-def load_local_env(path: pathlib.Path = ENV_FILE, overrides: dict | None = None) -> dict:
-    """Read `.env.local`, apply overrides, and refuse anything non-local."""
+def env_file_path() -> pathlib.Path:
+    return REPO / os.getenv("LOCAL_ENV_FILE", DEFAULT_ENV_FILE)
+
+
+def load_local_env(path: pathlib.Path | None = None, overrides: dict | None = None) -> dict:
+    """Read the local env file, apply overrides, and refuse anything non-local."""
+    path = env_file_path() if path is None else path
     if not path.exists():
         raise SystemExit(
-            f"{path.name} not found. Copy .env.local.example to .env.local first."
+            f"{path.name} not found. Copy .env.local.example to {path.name} first."
         )
 
     env = {k: v for k, v in dotenv_values(path).items() if v is not None}
@@ -55,6 +64,17 @@ def load_local_env(path: pathlib.Path = ENV_FILE, overrides: dict | None = None)
             )
 
     return env
+
+
+def expected_native_dim(env: dict) -> int:
+    """How many numbers the model should return: its native width, not the column's.
+
+    Resolved by the gateway's own rules, so the padding configuration
+    (EMBEDDING_DIM=1536, EMBEDDING_NATIVE_DIM=768) checks for 768.
+    """
+    from app.services.embeddings import resolve_embedding_config
+
+    return resolve_embedding_config(env)["EMBEDDING_NATIVE_DIM"]
 
 
 def apply_to_process(env: dict) -> None:

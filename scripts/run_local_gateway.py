@@ -2,6 +2,7 @@
 
     python scripts/run_local_gateway.py
     python scripts/run_local_gateway.py --port=8011 --set EMBEDDING_MODEL=nope
+    python scripts/run_local_gateway.py --env-file .env.local.padded
 
 Loads `.env.local` and nothing else (see scripts/_local_env.py for why that needs
 saying), refuses any non-local URL, then starts uvicorn. `--set KEY=VALUE` overrides
@@ -15,6 +16,8 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import os  # noqa: E402
+
 from scripts._local_env import REPO, apply_to_process, load_local_env  # noqa: E402
 
 
@@ -22,7 +25,13 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    parser.add_argument("--env-file", default=None,
+                        help="env file relative to the repo (sets LOCAL_ENV_FILE)")
     args = parser.parse_args(argv)
+
+    if args.env_file:
+        # Through the environment, so the gateway's own subprocesses agree.
+        os.environ["LOCAL_ENV_FILE"] = args.env_file
 
     overrides = {}
     for item in args.set:
@@ -43,7 +52,8 @@ def main(argv=None) -> None:
     print(
         f"Local gateway on http://127.0.0.1:{port}  "
         f"upstream={env['UPSTREAM_MODEL']}  embeddings={env['EMBEDDING_MODEL']} "
-        f"({env.get('EMBEDDING_DIM', '1536')} dims)  "
+        f"(column {env.get('EMBEDDING_DIM', '1536')}, "
+        f"native {env.get('EMBEDDING_NATIVE_DIM') or env.get('EMBEDDING_DIM', '1536')})  "
         f"threshold={env.get('SEMANTIC_CACHE_THRESHOLD', '0.92')}",
         flush=True,
     )

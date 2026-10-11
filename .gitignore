@@ -11,3 +11,5 @@ __pycache__/
 .env.local
 .local-credentials.json
 .local-broken-gateway.log
+.env.local.padded
+.local-smoke-similarity.json

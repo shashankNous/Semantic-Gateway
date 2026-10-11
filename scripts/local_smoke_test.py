@@ -51,6 +51,11 @@ GATEWAY = f"http://127.0.0.1:{env.get('LOCAL_GATEWAY_PORT', '8010')}"
 BROKEN_GATEWAY_PORT = int(env.get("LOCAL_GATEWAY_PORT", "8010")) + 1
 THRESHOLD = float(env["SEMANTIC_CACHE_THRESHOLD"])
 REDIS_CONTAINER = "sg-local-redis"
+COLUMN_DIM = int(env.get("EMBEDDING_DIM", "1536"))
+NATIVE_DIM = int(env.get("EMBEDDING_NATIVE_DIM") or COLUMN_DIM)
+#: Case 3's gateway similarity per column width, kept between runs (gitignored),
+#: so a padded run can be compared with an unpadded one.
+SIMILARITY_RECORD = REPO / ".local-smoke-similarity.json"
 MAX_TOKENS = 60  # keeps each phi3 miss to ~15s; part of the cache key, so fixed
 
 results: list[tuple[str, str, str]] = []
@@ -130,6 +135,34 @@ def last_logged_similarity(tid: int) -> float | None:
 def reset_state() -> None:
     sql("TRUNCATE requests, cache_entries, stats_access_log")
     Redis.from_url(env["REDIS_URL"]).flushdb()
+
+
+def compare_with_other_widths(score: float) -> None:
+    """Case 3b: zero padding must leave the semantic-hit score unchanged.
+
+    Records this run's case 3 score under its column/native widths and compares
+    it with any run recorded at a different column width (4 decimal places).
+    """
+    try:
+        record = json.loads(SIMILARITY_RECORD.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        record = {}
+
+    this_run = f"column {COLUMN_DIM}, native {NATIVE_DIM}"
+    record[this_run] = score
+    SIMILARITY_RECORD.write_text(json.dumps(record, indent=2), encoding="utf-8")
+
+    others = {k: v for k, v in record.items() if not k.startswith(f"column {COLUMN_DIM},")}
+    if not others:
+        print(f"           (no run at another column width recorded yet; "
+              f"this one: {this_run} -> {score:.6f})", flush=True)
+        return
+
+    for other, other_score in others.items():
+        check(round(score, 4) == round(other_score, 4),
+              "3b. Padding leaves the semantic-hit score unchanged",
+              f"{this_run}: {score:.6f}  vs  {other}: {other_score:.6f}  "
+              f"(difference {abs(score - other_score):.2e})")
 
 
 def wait_for_health(base: str, seconds: float) -> bool:
@@ -285,8 +318,11 @@ def main() -> int:
         print(f"No gateway at {GATEWAY}. Start it with: python scripts/run_local_gateway.py")
         return 1
 
+    column = sql("SELECT atttypmod FROM pg_attribute "
+                 "WHERE attrelid = 'cache_entries'::regclass AND attname = 'embedding'")
     print(f"Gateway {GATEWAY}, upstream {env['UPSTREAM_MODEL']}, embeddings "
-          f"{env['EMBEDDING_MODEL']} ({env['EMBEDDING_DIM']} dims), threshold {THRESHOLD}\n")
+          f"{env['EMBEDDING_MODEL']} (native {NATIVE_DIM}, column {COLUMN_DIM}; database "
+          f"column is vector({column})), threshold {THRESHOLD}\n")
     reset_state()
     a_id = tenant_id("Local Tenant A")
 
@@ -312,6 +348,8 @@ def main() -> int:
         check(status == 200 and cache == "SEMANTIC_HIT", "3. Reworded prompt: semantic hit",
               f"-> {status} {cache} in {elapsed:.2f}s; gateway similarity "
               f"{logged if logged is None else round(logged, 4)}, recomputed {score:.4f}")
+        if logged is not None:
+            compare_with_other_widths(logged)
 
         # 4. Unrelated prompt
         unrelated = "What is the capital of France?"

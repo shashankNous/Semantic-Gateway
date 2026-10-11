@@ -18,6 +18,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["scripts/run_local_gateway.py"],
       "port": 8010
+    },
+    {
+      "name": "gateway-local-padded",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["scripts/run_local_gateway.py", "--env-file", ".env.local.padded"],
+      "port": 8010
     }
   ]
 }

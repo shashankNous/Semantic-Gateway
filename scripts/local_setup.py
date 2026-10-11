@@ -40,6 +40,7 @@ from scripts._local_env import (  # noqa: E402
     REPO,
     apply_to_process,
     child_env,
+    expected_native_dim,
     load_local_env,
 )
 
@@ -56,7 +57,7 @@ def step(message: str) -> None:
 
 
 def check_embedding_dimension(env: dict) -> None:
-    expected = int(env["EMBEDDING_DIM"])
+    expected = expected_native_dim(env)
     request = urllib.request.Request(
         env["EMBEDDING_BASE_URL"].rstrip("/") + "/embeddings",
         data=json.dumps({"model": env["EMBEDDING_MODEL"], "input": "dimension check"}).encode(),
@@ -77,8 +78,9 @@ def check_embedding_dimension(env: dict) -> None:
 
     if actual != expected:
         raise SystemExit(
-            f"{env['EMBEDDING_MODEL']} returns {actual} dimensions but EMBEDDING_DIM is "
-            f"{expected}. Set EMBEDDING_DIM={actual} in .env.local."
+            f"{env['EMBEDDING_MODEL']} returns {actual} dimensions but the configured native width is "
+            f"{expected}. Set EMBEDDING_NATIVE_DIM={actual} (or EMBEDDING_DIM, if the model "
+            "fills the column) in your local env file."
         )
     print(f"  {env['EMBEDDING_MODEL']} returns {actual} dimensions, as configured")
 
