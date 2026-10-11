@@ -86,4 +86,14 @@ async def _embed_with_openai(text: str) -> list[float]:
             f"not a list) for model {EMBEDDING_MODEL!r}"
         )
 
+    # The startup check only proves the column matches EMBEDDING_DIM; this proves
+    # the model does. Otherwise a mismatch surfaces at the cache_entries INSERT,
+    # after the upstream completion has already been paid for.
+    if len(embedding) != EMBEDDING_DIM:
+        raise EmbeddingUnavailableError(
+            f"Embedding has the wrong size: expected {EMBEDDING_DIM}, got "
+            f"{len(embedding)} from model {EMBEDDING_MODEL!r}. Set EMBEDDING_DIM to "
+            "match the model (and migrate a matching database)."
+        )
+
     return embedding

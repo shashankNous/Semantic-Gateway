@@ -237,3 +237,36 @@ def test_the_degradation_is_logged_once_with_the_exception_type(degraded_route, 
     records = [r for r in caplog.records if "embedding" in r.getMessage().lower()]
     assert len(records) == 1
     assert "EmbeddingUnavailableError" in records[0].getMessage()
+
+
+# --- Fix 4: the returned vector must be EMBEDDING_DIM wide -----------------------
+
+
+def test_a_wrong_length_embedding_raises_embedding_unavailable(embedding_transport):
+    """Caught here, before upstream is paid, instead of at the cache_entries INSERT."""
+    wrong = [0.1] * (embeddings.EMBEDDING_DIM - 1)
+    embedding_transport(lambda request: httpx.Response(200, json=embedding_body(wrong)))
+
+    with pytest.raises(EmbeddingUnavailableError) as excinfo:
+        run(embed_text("hello"))
+
+    message = str(excinfo.value)
+    assert f"expected {embeddings.EMBEDDING_DIM}" in message
+    assert f"got {len(wrong)}" in message
+    assert embeddings.EMBEDDING_MODEL in message
+
+
+def test_a_wrong_length_embedding_degrades_the_request(degraded_route, embedding_transport,
+                                                       monkeypatch):
+    """End to end through the real embed_text(): a 200 answered as a degraded miss."""
+    wrong = [0.1] * (embeddings.EMBEDDING_DIM + 8)
+    embedding_transport(lambda request: httpx.Response(200, json=embedding_body(wrong)))
+    monkeypatch.setattr(proxy_module, "embed_text", embed_text)
+
+    response = run(proxy_module.proxy(FakeRequest(chat_body("What is pgvector?"))))
+
+    assert response.status_code == 200
+    assert response.headers["X-Cache"] == "MISS"
+    assert response.headers["X-Cache-Degraded"] == "embedding-unavailable"
+    assert degraded_route["semantic_lookups"] == 0
+    assert degraded_route["semantic_writes"] == []
