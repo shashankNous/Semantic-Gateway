@@ -18,6 +18,7 @@ import pytest
 from scripts._migrations import (
     FIRST_MIGRATION,
     apply_rerunnable_migrations,
+    render_migration,
     rerunnable_migrations,
 )
 
@@ -142,3 +143,43 @@ def test_no_script_names_a_migration_other_than_the_first(script):
         "apply them by globbing migrations/ instead, or a future migration is skipped"
     )
     assert "apply_rerunnable_migrations" in source
+
+
+# --- Embedding width substitution ---------------------------------------------
+
+
+def test_the_production_width_sends_002_exactly_as_written():
+    sql = (MIGRATIONS / "002_semantic_cache.sql").read_text(encoding="utf-8")
+
+    assert "vector(1536)" in sql
+    assert render_migration(sql, 1536) == sql
+
+
+def test_a_local_width_rewrites_only_the_vector_column():
+    sql = (MIGRATIONS / "002_semantic_cache.sql").read_text(encoding="utf-8")
+
+    rendered = render_migration(sql, 768)
+
+    assert "vector(768)" in rendered
+    assert "vector(1536)" not in rendered
+    assert rendered.replace("vector(768)", "vector(1536)") == sql
+
+
+@pytest.mark.parametrize("dim", [0, 2001, 3072])
+def test_a_width_the_hnsw_index_cannot_hold_is_refused(dim):
+    with pytest.raises(ValueError, match="EMBEDDING_DIM"):
+        render_migration("embedding vector(1536)", dim)
+
+
+def test_applying_migrations_uses_the_requested_width(tmp_path):
+    (tmp_path / "002_x.sql").write_text("CREATE TABLE t (e vector(1536));", encoding="utf-8")
+
+    executed = []
+
+    class RecordingConn:
+        async def execute(self, sql):
+            executed.append(sql)
+
+    asyncio.run(apply_rerunnable_migrations(RecordingConn(), tmp_path, embedding_dim=768))
+
+    assert executed == ["CREATE TABLE t (e vector(768));"]

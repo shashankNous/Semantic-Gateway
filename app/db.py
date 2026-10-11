@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import asyncpg
 
 from app.security import SCOPE_DASHBOARD, SCOPE_PROXY, hash_token
+from app.services.embeddings import EMBEDDING_DIM
 
 load_dotenv()
 
@@ -118,6 +119,49 @@ async def verify_auth_schema():
 
     logger.info("Credential schema verified: %s tenant(s), all with a proxy key hash",
                 row["total"])
+
+
+async def verify_embedding_dimension(expected: int | None = None):
+    """Fail fast if `cache_entries.embedding` is not as wide as EMBEDDING_DIM.
+
+    Otherwise the first cache miss after a model or dimension change embeds fine,
+    calls upstream, and then fails on the INSERT with a pgvector dimension error,
+    after the upstream call has already been paid for.
+    """
+    if pool is None:
+        raise RuntimeError("Postgres pool is not initialized")
+
+    expected = EMBEDDING_DIM if expected is None else expected
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT to_regclass('cache_entries') IS NOT NULL AS has_table,
+                   (SELECT atttypmod FROM pg_attribute
+                    WHERE attrelid = to_regclass('cache_entries')
+                      AND attname = 'embedding'
+                      AND NOT attisdropped) AS dim
+            """
+        )
+
+    # ASCII only, as above.
+    if not row["has_table"]:
+        raise RuntimeError(
+            "No `cache_entries` table in this database. Apply migrations/ in order "
+            "before starting the app (see README)."
+        )
+
+    actual = row["dim"]
+    if actual != expected:
+        raise RuntimeError(
+            "cache_entries.embedding is vector(%s) but EMBEDDING_DIM is %s - the "
+            "configured embedding model does not fit this database. Point the app "
+            "at a database migrated with EMBEDDING_DIM=%s, or set EMBEDDING_DIM "
+            "(and EMBEDDING_MODEL) to match the column."
+            % (actual, expected, expected)
+        )
+
+    logger.info("Embedding column verified: vector(%s)", actual)
 
 
 #: Which hash column backs each scope. See migrations/005_token_scopes.sql for why

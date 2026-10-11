@@ -139,9 +139,51 @@ def test_startup_runs_the_check_after_opening_the_pool(monkeypatch):
     async def fake_verify():
         calls.append("verify_auth_schema")
 
+    async def fake_verify_dim():
+        calls.append("verify_embedding_dimension")
+
     monkeypatch.setattr(main, "init_db_pool", fake_init)
     monkeypatch.setattr(main, "verify_auth_schema", fake_verify)
+    monkeypatch.setattr(main, "verify_embedding_dimension", fake_verify_dim)
 
     run(main.startup())
 
-    assert calls == ["init_db_pool", "verify_auth_schema"]
+    assert calls == ["init_db_pool", "verify_auth_schema", "verify_embedding_dimension"]
+
+
+# --- Embedding column width ---------------------------------------------------
+
+
+def column(dim, has_table=True):
+    return {"has_table": has_table, "dim": dim}
+
+
+def test_a_matching_vector_width_starts(use_pool):
+    use_pool(FakeConn(column(1536)))
+
+    run(db.verify_embedding_dimension(1536))  # no raise
+
+
+def test_a_mismatched_vector_width_refuses_to_start(use_pool):
+    """e.g. a production-width table with a 768-dim local embedding model."""
+    use_pool(FakeConn(column(1536)))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        run(db.verify_embedding_dimension(768))
+
+    message = str(excinfo.value)
+    assert "vector(1536)" in message
+    assert "EMBEDDING_DIM is 768" in message
+
+
+def test_a_missing_cache_entries_table_is_reported_as_missing_migrations(use_pool):
+    use_pool(FakeConn(column(None, has_table=False)))
+
+    with pytest.raises(RuntimeError, match="cache_entries"):
+        run(db.verify_embedding_dimension(1536))
+
+
+def test_the_dimension_check_defaults_to_the_configured_width(use_pool):
+    use_pool(FakeConn(column(db.EMBEDDING_DIM)))
+
+    run(db.verify_embedding_dimension())

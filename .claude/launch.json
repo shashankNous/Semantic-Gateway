@@ -12,6 +12,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--port", "8000"],
       "port": 8000
+    },
+    {
+      "name": "gateway-local",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["scripts/run_local_gateway.py"],
+      "port": 8010
     }
   ]
 }

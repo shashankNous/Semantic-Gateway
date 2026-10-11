@@ -33,6 +33,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from app.security import hash_token  # noqa: E402  (path setup must precede the import)
+from app.services.embeddings import EMBEDDING_DIM  # noqa: E402  (same)
 from scripts._migrations import (  # noqa: E402  (same)
     FIRST_MIGRATION,
     MIGRATIONS_DIR,
@@ -51,7 +52,8 @@ DEMO_DASHBOARD_TOKEN = "dash_demo-tenant-token"
 EMPTY_PROXY_KEY = "sk-demo-empty-key"
 EMPTY_DASHBOARD_TOKEN = "dash_demo-empty-token"
 
-EMBEDDING_DIMS = 1536
+# Matches the column width the migrations create (EMBEDDING_DIM, default 1536).
+EMBEDDING_DIMS = EMBEDDING_DIM
 
 # (normalized_query, min_similarity, max_similarity). Hit counts are not listed
 # here: they are derived from the generated traffic so the "top cached" table and

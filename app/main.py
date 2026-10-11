@@ -2,7 +2,7 @@ from fastapi import FastAPI
 
 from app.routes.proxy import router as proxy_router
 from app.routes.stats import router as stats_router
-from app.db import init_db_pool, close_db_pool, verify_auth_schema
+from app.db import init_db_pool, close_db_pool, verify_auth_schema, verify_embedding_dimension
 from app.middleware import StatsAccessLogMiddleware, StatsCORSMiddleware
 
 app = FastAPI(title="Semantic LLM Caching Gateway")
@@ -21,6 +21,9 @@ async def startup():
     # backfill has not run would 401 every request, one quiet request at a time.
     # Refuse to come up instead. See app/db.py:verify_auth_schema.
     await verify_auth_schema()
+    # Same idea for the semantic cache: a vector width that does not match the
+    # embedding model would otherwise surface as an INSERT error on the first miss.
+    await verify_embedding_dimension()
 
 
 @app.on_event("shutdown")

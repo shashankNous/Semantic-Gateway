@@ -19,9 +19,22 @@ Adding a migration therefore needs no change here: drop `007_*.sql` in
 `migrations/`, keep it idempotent, and both scripts pick it up. A migration that is
 *not* safe to re-run does not belong in this directory without the same kind of
 guard `001` gets.
+
+Embedding width. `002_semantic_cache.sql` declares `vector(1536)`, the width of the
+production embedding model, and the file is left exactly as it is so the README's
+`psql < migrations/...` route keeps working. When `EMBEDDING_DIM` is set to
+something else (local testing against an Ollama embedding model), these helpers
+rewrite that one literal before executing. At the default the SQL sent is
+byte-for-byte the file on disk.
 """
 
 import pathlib
+
+from app.services.embeddings import DEFAULT_EMBEDDING_DIM, EMBEDDING_DIM
+
+#: pgvector's HNSW index (built on cache_entries.embedding in 002) refuses any
+#: `vector` column wider than this.
+HNSW_MAX_DIM = 2000
 
 #: Applied only to a fresh database, by whichever caller creates one. Not part of
 #: the re-runnable set below.
@@ -40,14 +53,39 @@ def rerunnable_migrations(migrations_dir: pathlib.Path | None = None) -> list[pa
     return sorted(p for p in directory.glob("*.sql") if p.name != FIRST_MIGRATION)
 
 
-async def apply_rerunnable_migrations(conn, migrations_dir: pathlib.Path | None = None) -> list[str]:
+def render_migration(sql: str, embedding_dim: int | None = None) -> str:
+    """The SQL to execute for one migration, with the vector width substituted.
+
+    A no-op unless `embedding_dim` differs from the production width.
+    """
+    dim = EMBEDDING_DIM if embedding_dim is None else embedding_dim
+
+    if dim == DEFAULT_EMBEDDING_DIM:
+        return sql
+
+    if not 0 < dim <= HNSW_MAX_DIM:
+        raise ValueError(
+            f"EMBEDDING_DIM={dim} is not supported: the HNSW index on "
+            f"cache_entries.embedding allows 1..{HNSW_MAX_DIM} dimensions"
+        )
+
+    return sql.replace(f"vector({DEFAULT_EMBEDDING_DIM})", f"vector({dim})")
+
+
+async def apply_rerunnable_migrations(
+    conn,
+    migrations_dir: pathlib.Path | None = None,
+    embedding_dim: int | None = None,
+) -> list[str]:
     """Apply every idempotent migration in order. Returns the filenames applied.
 
     Safe against a fully migrated database: each statement carries its own
     `IF NOT EXISTS` guard, so this re-applies to a no-op rather than erroring.
+    Note that this also means a changed `EMBEDDING_DIM` does *not* resize an
+    existing `cache_entries` table; the app's startup check reports the mismatch.
     """
     applied = []
     for path in rerunnable_migrations(migrations_dir):
-        await conn.execute(path.read_text(encoding="utf-8"))
+        await conn.execute(render_migration(path.read_text(encoding="utf-8"), embedding_dim))
         applied.append(path.name)
     return applied

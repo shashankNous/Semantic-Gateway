@@ -1,0 +1,43 @@
+# Local test stack: Postgres + pgvector and Redis only. The gateway runs on the
+# host (scripts/run_local_gateway.py) so it can reach Ollama on localhost:11434.
+#
+# Ports are deliberately off the defaults so this never collides with the
+# production-shaped docker-compose.yml (5432/6379) or the seed_demo database (5433).
+#
+#   docker compose -f docker-compose.local.yml up -d --wait
+#   docker compose -f docker-compose.local.yml down -v     # also wipes the data
+#
+# Not for deployment. The password below is a fixed local-only value.
+name: semantic-gateway-local
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: sg-local-postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=localtest
+      - POSTGRES_DB=semanticdb
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - sg_local_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d semanticdb"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7
+    container_name: sg-local-redis
+    ports:
+      - "127.0.0.1:56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  sg_local_pgdata:
