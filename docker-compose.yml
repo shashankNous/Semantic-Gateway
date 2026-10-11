@@ -26,8 +26,14 @@ services:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=semanticdb
+    # Host port 5433, container port unchanged. 5432 on this machine is held by a
+    # native Postgres service; the app container is unaffected either way, since
+    # DATABASE_URL reaches this service as `postgres:5432` over the compose
+    # network rather than through the published port. Host-side scripts
+    # (scripts/seed_demo.py, scripts/seed_rehearsal_tenant.py) already default to
+    # 5433.
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 

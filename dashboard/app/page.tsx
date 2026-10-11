@@ -3,13 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { GATEWAY_URL, fetchDashboardData, type DashboardData } from "@/lib/gateway";
-import { DEFAULT_MODEL_ID } from "@/lib/pricing";
 import { HitRateChart } from "@/components/HitRateChart";
 import { SavingsPanel } from "@/components/SavingsPanel";
 import { TopCachedTable } from "@/components/TopCachedTable";
 
 export default function DashboardPage() {
-  const [modelId, setModelId] = useState(DEFAULT_MODEL_ID);
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -78,12 +76,7 @@ export default function DashboardPage() {
       )}
 
       <div className="space-y-6">
-        <SavingsPanel
-          stats={data?.stats ?? null}
-          loading={loading}
-          modelId={modelId}
-          onModelChange={setModelId}
-        />
+        <SavingsPanel stats={data?.stats ?? null} loading={loading} />
         <HitRateChart trend={data?.trend ?? []} loading={loading} />
         <TopCachedTable entries={data?.topCached ?? []} loading={loading} />
       </div>

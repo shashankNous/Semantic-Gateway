@@ -24,10 +24,23 @@ class FakePool:
 
 
 class FakeStatsConn:
-    def __init__(self, rows):
-        self.rows = rows
+    """Stands in for the two queries get_stats() runs.
 
-    async def fetch(self, *args):
+    They are told apart by the SQL rather than by call order, so reordering the
+    queries in the route does not silently hand one of them the other's rows.
+    """
+
+    def __init__(self, rows, model_rows=None):
+        self.rows = rows
+        self.model_rows = (
+            model_rows
+            if model_rows is not None
+            else [{"model": "mistral-small-latest", "count": sum(r["count"] for r in rows)}]
+        )
+
+    async def fetch(self, query, *args):
+        if "GROUP BY COALESCE(model" in query:
+            return self.model_rows
         return self.rows
 
 
@@ -81,3 +94,62 @@ def test_get_stats_with_no_requests(monkeypatch):
     assert stats["prompt_tokens_saved"] == 0
     assert stats["completion_tokens_saved"] == 0
     assert stats["estimated_cost_saved_usd"] == 0.0
+
+
+def test_stats_reports_the_models_that_actually_served_the_traffic(monkeypatch):
+    """The dashboard prices saved tokens from this, so it must come from the data.
+
+    Before this field existed the dashboard let you pick any vendor from a
+    dropdown, which put a dollar figure under a model that was never called.
+    """
+    rows = [
+        {"cache_status": "SEMANTIC_HIT", "count": 155, "avg_latency_ms": 620.0,
+         "prompt_tokens": 4094, "completion_tokens": 45302},
+        {"cache_status": "MISS", "count": 138, "avg_latency_ms": 3577.0,
+         "prompt_tokens": 3585, "completion_tokens": 41371},
+    ]
+    conn = FakeStatsConn(rows, model_rows=[{"model": "mistral-small-latest", "count": 293}])
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(conn))
+
+    result = run(stats_module.get_stats(tenant=dashboard_tenant(3)))
+
+    assert result["models"] == [{"model": "mistral-small-latest", "requests": 293}]
+    # Only hits count as saved, so the miss tokens above must not leak in.
+    assert result["prompt_tokens_saved"] == 4094
+    assert result["completion_tokens_saved"] == 45302
+
+
+def test_stats_reports_every_model_when_traffic_is_mixed(monkeypatch):
+    rows = [
+        {"cache_status": "SEMANTIC_HIT", "count": 10, "avg_latency_ms": 600.0,
+         "prompt_tokens": 100, "completion_tokens": 200},
+    ]
+    conn = FakeStatsConn(
+        rows,
+        model_rows=[
+            {"model": "mistral-small-latest", "count": 8},
+            {"model": "mistral-large-latest", "count": 2},
+        ],
+    )
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(conn))
+
+    result = run(stats_module.get_stats(tenant=dashboard_tenant(3)))
+
+    assert result["models"] == [
+        {"model": "mistral-small-latest", "requests": 8},
+        {"model": "mistral-large-latest", "requests": 2},
+    ]
+
+
+def test_stats_labels_untracked_model_as_unknown(monkeypatch):
+    """A NULL requests.model must not be dropped - it would understate the mix."""
+    rows = [
+        {"cache_status": "MISS", "count": 3, "avg_latency_ms": 900.0,
+         "prompt_tokens": 30, "completion_tokens": 40},
+    ]
+    conn = FakeStatsConn(rows, model_rows=[{"model": "unknown", "count": 3}])
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(conn))
+
+    result = run(stats_module.get_stats(tenant=dashboard_tenant(3)))
+
+    assert result["models"] == [{"model": "unknown", "requests": 3}]

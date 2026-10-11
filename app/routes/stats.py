@@ -44,6 +44,21 @@ async def get_stats(tenant: dict = Depends(require_dashboard_key)):
             tenant_id,
         )
 
+        # Which upstream model actually served this tenant's traffic. Without it a
+        # dashboard has no way to price the saved tokens except by guessing, and a
+        # guessed model is how you end up showing a dollar figure for a vendor that
+        # was never called.
+        model_rows = await conn.fetch(
+            """
+            SELECT COALESCE(model, 'unknown') AS model, COUNT(*) AS count
+            FROM requests
+            WHERE tenant_id = $1
+            GROUP BY COALESCE(model, 'unknown')
+            ORDER BY COUNT(*) DESC
+            """,
+            tenant_id,
+        )
+
     counts = {"EXACT_HIT": 0, "SEMANTIC_HIT": 0, "MISS": 0, "UNCACHEABLE": 0}
     avg_latency_by_cache_status = {}
     total_requests = 0
@@ -82,6 +97,9 @@ async def get_stats(tenant: dict = Depends(require_dashboard_key)):
         "avg_latency_ms_by_cache_status": avg_latency_by_cache_status,
         "prompt_tokens_saved": prompt_tokens_saved,
         "completion_tokens_saved": completion_tokens_saved,
+        "models": [
+            {"model": row["model"], "requests": row["count"]} for row in model_rows
+        ],
         "estimated_cost_saved_usd": round((tokens_saved / 1000) * COST_PER_1K_TOKENS, 6),
     }
 

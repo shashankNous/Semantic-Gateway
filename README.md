@@ -248,6 +248,11 @@ from a bad key; in the logs it is just a stream of ordinary 401s.
    for f in migrations/*.sql; do psql "$DATABASE_URL" -f "$f"; done
    ```
 
+   On RDS this must run as the **master user**, which carries `rds_superuser`:
+   `002_semantic_cache.sql` issues `CREATE EXTENSION vector`, and pgvector ships
+   untrusted (`trusted = false`), so no lower-privileged application role can install
+   it. Step 2 uses the same `DATABASE_URL` and inherits the requirement.
+
 2. **Run the backfill to completion.** This populates the hash columns and mints a
    `dash_…` token per tenant. It prints new credentials **once** — capture them.
 

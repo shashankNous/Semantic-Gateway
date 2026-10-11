@@ -50,6 +50,13 @@ def _stats_row(count):
 
 STATS_ROWS = {TENANT_A["id"]: [_stats_row(7)], TENANT_B["id"]: [_stats_row(999)]}
 
+# Distinct per tenant on purpose: the models list is part of the stats payload, so
+# it has to be as tenant-scoped as the counts are.
+MODEL_ROWS = {
+    TENANT_A["id"]: [{"model": "mistral-small-latest", "count": 7}],
+    TENANT_B["id"]: [{"model": "mistral-large-latest", "count": 999}],
+}
+
 TREND_ROWS = {
     TENANT_A["id"]: [{"day": "2026-08-10T00:00:00+00:00", "total_requests": 7, "hit_count": 7}],
     TENANT_B["id"]: [{"day": "2026-08-10T00:00:00+00:00", "total_requests": 999, "hit_count": 999}],
@@ -110,6 +117,8 @@ class TenantScopedConn:
             return TOP_CACHED_ROWS.get(param, [])
         if "date_trunc" in sql:
             return TREND_ROWS.get(param, [])
+        if "GROUP BY COALESCE(model" in sql:
+            return MODEL_ROWS.get(param, [])
         return STATS_ROWS.get(param, [])
 
     async def execute(self, sql, *args):

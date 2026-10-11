@@ -29,6 +29,14 @@ export interface Stats {
   avg_latency_ms_by_cache_status: Record<string, number | null>;
   prompt_tokens_saved: number;
   completion_tokens_saved: number;
+  /** Upstream models that actually served this tenant, from `requests.model`. */
+  models: { model: string; requests: number }[];
+  /**
+   * The gateway's own flat-rate blend (COST_PER_1K_TOKENS). Kept for API
+   * compatibility but not displayed: it prices input and output identically, so
+   * it disagrees with the per-model figure the panel shows and two different
+   * dollar amounts for one quantity is worse than one.
+   */
   estimated_cost_saved_usd: number;
 }
 

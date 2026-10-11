@@ -16,6 +16,14 @@ would make that decision silently.
     every existing key stops working the moment this runs. Choose this if you must
     assume the old keys leaked.
 
+Re-running `--mode=rotate` is not a no-op, and the two credential types diverge
+there. Proxy keys are re-minted every time: the rotate branch overwrites
+`api_key_hash` without first checking whether one is already on file, so a second
+run breaks the keys the first run issued, and every caller re-keyed in between is
+broken again. Dashboard tokens are not re-minted — they are only issued where
+`dashboard_token_hash` is NULL, so a re-run leaves an existing one alone. Rotate is
+idempotent for dashboard tokens and emphatically not for proxy keys.
+
 `--dry-run` is independent and works with either mode: schema migrations still
 apply, but no credential is written and nothing is dropped.
 
