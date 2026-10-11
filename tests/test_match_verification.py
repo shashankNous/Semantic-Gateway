@@ -95,3 +95,44 @@ def test_question_words_after_a_comma_are_not_entities():
 def test_i_and_its_contractions_are_not_entities():
     assert has_entity_mismatch("Why can't I'm log in after I've reset it?",
                                "Why can't I log in after a reset?") is False
+
+
+# --- Item 2: stopwords must not hide real entities -------------------------------
+
+
+@pytest.mark.parametrize(
+    "query_a, query_b",
+    [
+        # All-caps acronyms whose lowercase form is a stopword.
+        ("Do I need a visa for the US?", "Do I need a visa for the UK?"),
+        ("Do you offer IT support?", "Do you offer HR support?"),
+        ("What does the WHO say about this?", "What does the CDC say about this?"),
+        # A month that is also a modal verb.
+        ("When should we deploy in May?", "When should we deploy in June?"),
+        # A given name that is also a modal verb.
+        ("Is Will on the release rota?", "Is Sam on the release rota?"),
+        # An acronym opening the sentence is still an acronym.
+        ("WHO guidance on masks?", "CDC guidance on masks?"),
+    ],
+)
+def test_stopword_lookalikes_are_still_compared(query_a, query_b):
+    assert has_entity_mismatch(query_a, query_b) is True
+    assert has_entity_mismatch(query_b, query_a) is True
+
+
+@pytest.mark.parametrize(
+    "query_a, query_b",
+    [
+        # A shouted question carries no capitalisation information.
+        ("WHAT IS PGVECTOR?", "what is pgvector?"),
+        ("WHAT IS PGVECTOR?", "What is pgvector?"),
+        ("What is pgvector?", "Can you explain what pgvector is?"),
+        ("How do I reset my password?", "I forgot my password, how do I change it?"),
+        # Modal "may"/"will" in lower case are not entities.
+        ("Will this work on Linux?", "Can this work on Linux?"),
+        ("How may I export it to S3?", "How can I export it to S3?"),
+    ],
+)
+def test_stopword_audit_keeps_accepting_paraphrases(query_a, query_b):
+    assert has_entity_mismatch(query_a, query_b) is False
+    assert has_entity_mismatch(query_b, query_a) is False
