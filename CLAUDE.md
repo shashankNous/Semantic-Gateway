@@ -14,7 +14,8 @@ README.md is the full reference; this file is the working summary.
   `cache_entries` with an HNSW cosine index on `embedding`.
 - **Redis:** exact-match cache and the per-tenant rate limiter.
 - **Upstream:** Mistral chat completions (`mistral-small-latest`).
-- **Embeddings:** OpenAI `text-embedding-3-small`, 1536 dimensions.
+- **Embeddings:** OpenAI `text-embedding-3-small`, 1536 dimensions, by default;
+  a `mistral` preset (`mistral-embed`, 1024, padded to 1536) is available.
 - **Dashboard:** Next.js 14 (`dashboard/`), proxies to the gateway server-side.
 - **Deploy:** Railway (`railway.json`, `Dockerfile`); dashboard on Vercel.
 
@@ -40,7 +41,7 @@ README.md is the full reference; this file is the working summary.
 
 ```bash
 docker-compose up --build            # app :8000, redis :6379, postgres :5432
-python -m pytest -q                  # unit tests; no network, no database
+python -m pytest -q                  # tests/ only (pytest.ini); no network, no database
 npm --prefix dashboard run dev       # dashboard :3000
 ```
 
@@ -55,9 +56,19 @@ npm --prefix dashboard run dev       # dashboard :3000
 - `fix-verification-and-embedding-failures`: branched from `local-model-testing`;
   exact entity matching, embedding-failure degradation, single-path `.env`
   loading, per-request embedding size check. Local only.
+- `reconcile-wip-with-fixes`: branched from the fixes branch; brings over the
+  `wip-main-folder-changes` snapshot (Mistral embeddings, stats `models`, dashboard
+  pricing, rehearsal scripts) with the Mistral work ported onto the fixes design.
+  Local only.
 
 ## Project rules
 
+- **NEVER MIX EMBEDDING MODELS WITHIN ONE TENANT'S `cache_entries`.** Vectors from
+  different models are not comparable even when they fit the same column: a
+  padded `mistral-embed` vector and a native OpenAI one still produce a cosine
+  score, and it means nothing. No check catches it, because every row looks valid
+  on its own. Changing `EMBEDDING_PROVIDER` or `EMBEDDING_MODEL` means a fresh
+  tenant, or clearing that tenant's `cache_entries` first.
 - **Test requests use `temperature=0`.** Streaming, tool calls, non-zero
   temperature, and personalised or time-sensitive prompts ("my order", "today",
   "latest") bypass the cache entirely and come back `X-Cache: UNCACHEABLE`.
@@ -97,6 +108,23 @@ npm --prefix dashboard run dev       # dashboard :3000
   delays every exact-cache miss by the full timeout before degrading, so it is kept
   short. Must be a finite number greater than 0, or the app refuses to start.
   `.env.local` uses 60, because the first Ollama call loads the model.
+- **Embedding providers are presets.** `EMBEDDING_PROVIDER` (optional; unset
+  means `openai`) fills in defaults only: `openai` is api.openai.com,
+  `OPENAI_API_KEY`, `text-embedding-3-small`, native 1536; `mistral` is
+  api.mistral.ai, `MISTRAL_API_KEY`, `mistral-embed`, native 1024.
+  `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL` and
+  `EMBEDDING_NATIVE_DIM` override them one by one. Any other provider name stops
+  the app at startup, listing the valid ones.
+- **Two widths.** `EMBEDDING_DIM` is the `cache_entries.embedding` column (default
+  1536; migrations and the startup database check use it). `EMBEDDING_NATIVE_DIM`
+  is what the model returns: explicit, else the preset's, else `EMBEDDING_DIM`.
+  It must be between 1 and `EMBEDDING_DIM`, or the app refuses to start. The old
+  wip name `EMBEDDING_DIMS` is refused at startup with the rename.
+- **Padding.** Every response is checked against the native width (mismatch:
+  `EmbeddingUnavailableError`, so a degraded miss), then right-padded with zeros to
+  the column. Appending the same zeros to both vectors leaves cosine similarity
+  exactly unchanged, so padded scores are the model's true scores; the local
+  padding run reproduces case 3's 0.968510 to the last printed digit.
 - **`.env` comes from one path.** `app/env.py:load_env()` reads `ENV_FILE` if set,
   else `<project root>/.env` (root from the file's own location), never searches
   parent folders, and never overrides real environment variables. Don't call
@@ -123,17 +151,26 @@ docker compose -f docker-compose.local.yml down -v   # tear down and wipe
 
 How it fits together:
 
-- **Config is env-only.** `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY` (falls back to
-  `OPENAI_API_KEY`), `EMBEDDING_MODEL`, `EMBEDDING_DIM`, `UPSTREAM_BASE_URL`,
-  `UPSTREAM_MODEL`, `MISTRAL_API_KEY` (a dummy for Ollama),
-  `SEMANTIC_CACHE_THRESHOLD`. `EMBEDDING_PROVIDER=openai` means any
-  OpenAI-compatible endpoint, which Ollama's `/v1` is.
+- **Config is env-only.** `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`,
+  `EMBEDDING_MODEL`, `EMBEDDING_DIM`, `UPSTREAM_BASE_URL`, `UPSTREAM_MODEL`,
+  `MISTRAL_API_KEY` (a dummy for Ollama), `SEMANTIC_CACHE_THRESHOLD`.
+  `EMBEDDING_PROVIDER` stays **unset** locally: a preset would also set the native
+  width (1536 or 1024), and nomic returns 768.
 - **Vector width.** `002_semantic_cache.sql` still says `vector(1536)`;
   `scripts/_migrations.py` rewrites that literal only when `EMBEDDING_DIM` differs,
   so production SQL is unchanged. The app refuses to start if
   `cache_entries.embedding` does not match `EMBEDDING_DIM`. Changing the dimension
   needs a fresh database (`local_setup.py` always makes one).
-- **Only `.env.local` is read.** The local scripts set `PYTHON_DOTENV_DISABLED=1`,
+- **Padding run.** `.env.local.padded` (gitignored; copy `.env.local` and swap in
+  the commented `EMBEDDING_DIM=1536` / `EMBEDDING_NATIVE_DIM=768` alternative) keeps
+  a production-width `vector(1536)` column. Select it with `LOCAL_ENV_FILE`, which
+  every script and subprocess inherits:
+  `LOCAL_ENV_FILE=.env.local.padded python scripts/local_setup.py`, the
+  `gateway-local-padded` launch config (or `run_local_gateway.py --env-file
+  .env.local.padded`), then the smoke test with the same `LOCAL_ENV_FILE`. Case 3b
+  compares case 3's score with the last run at the other width
+  (`.local-smoke-similarity.json`, gitignored).
+- **Only the local env file is read.** The local scripts set `PYTHON_DOTENV_DISABLED=1`,
   which also switches off `app/env.py`, and refuse any non-localhost URL. Always
   start the local gateway through `run_local_gateway.py`, never plain uvicorn.
 - **Ports:** Postgres 55432, Redis 56379, gateway 8010 (8011 for the smoke test's
