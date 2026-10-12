@@ -77,7 +77,7 @@ async def find_semantic_match(
                 await conn.execute(
                     """
                     UPDATE cache_entries
-                    SET hit_count = hit_count + 1,
+                    SET hit_count = COALESCE(hit_count, 0) + 1,
                         min_similarity = LEAST(COALESCE(min_similarity, $2), $2),
                         max_similarity = GREATEST(COALESCE(max_similarity, $2), $2)
                     WHERE id = $1::uuid

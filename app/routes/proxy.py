@@ -1,26 +1,33 @@
+import logging
 import os
 import time
-from datetime import datetime
 
 import httpx
 
-from dotenv import load_dotenv
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 
-import app.db as db
+from app.env import load_env
 from app.auth import verify_api_key
 from app.services.logging import log_api_request
 from app.cache_key import build_cache_key
 from app.services.cache import get_cached_response, set_cached_response
+from app.services.rate_limit import enforce_rate_limit
 from app.services.semantic_cache import find_semantic_match, store_semantic_cache_entry
-from app.services.embeddings import embed_text
+from app.services.embeddings import EmbeddingUnavailableError, embed_text
 from app.services.normalization import normalize_query
 from app.services.cacheability import is_cacheable
 
-load_dotenv()
+load_env()
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
+
+#: Set on a response answered without the semantic cache because no embedding
+#: could be produced. X-Cache stays MISS, so existing stats keep counting it.
+DEGRADED_HEADER = "X-Cache-Degraded"
+EMBEDDING_UNAVAILABLE = "embedding-unavailable"
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 UPSTREAM_BASE_URL = os.getenv("UPSTREAM_BASE_URL", "https://api.mistral.ai/v1").rstrip("/")
@@ -29,7 +36,6 @@ MISTRAL_BASE_URL = os.getenv(
     "MISTRAL_BASE_URL",
     f"{UPSTREAM_BASE_URL}/chat/completions",
 )
-COST_PER_1K_TOKENS = float(os.getenv("COST_PER_1K_TOKENS", "0.002"))
 
 
 def is_request_cacheable(body: dict) -> bool:
@@ -100,6 +106,9 @@ async def proxy(request: Request):
     tenant_id = tenant["tenant_id"]
     tenant_uuid = tenant["tenant_uuid"]
 
+    # 2. Throttle per tenant, before any work that costs money or a round trip
+    await enforce_rate_limit(tenant_id)
+
     start = time.perf_counter()
     body = await request.json()
     body.setdefault("model", UPSTREAM_MODEL)
@@ -111,9 +120,10 @@ async def proxy(request: Request):
     cacheable = is_request_cacheable(body) and is_cacheable(normalized_query)
 
     embedding = None
+    degraded = False
 
     if cacheable:
-        # 2. Check Redis exact-match cache
+        # 3. Check Redis exact-match cache
         cached_response = await get_cached_response(cache_key)
 
         if cached_response is not None:
@@ -135,14 +145,26 @@ async def proxy(request: Request):
                 headers={"X-Cache": "EXACT_HIT"},
             )
 
-        # 3. Check semantic cache
-        embedding = await embed_text(normalized_query)
-        semantic_match = await find_semantic_match(
-            tenant_uuid,
-            embedding,
-            normalized_query,
-            raw_query=raw_query,
-        )
+        # 4. Check semantic cache. Without an embedding there is nothing to look up,
+        # so degrade to a plain miss rather than fail a request upstream can answer.
+        try:
+            embedding = await embed_text(normalized_query)
+        except EmbeddingUnavailableError as exc:
+            degraded = True
+            logger.warning(
+                "Semantic cache skipped, answering as a miss: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
+        semantic_match = None
+        if embedding is not None:
+            semantic_match = await find_semantic_match(
+                tenant_uuid,
+                embedding,
+                normalized_query,
+                raw_query=raw_query,
+            )
 
         if semantic_match is not None:
             latency_ms = int((time.perf_counter() - start) * 1000)
@@ -166,25 +188,27 @@ async def proxy(request: Request):
     else:
         print("Uncacheable request:", cache_key)
 
-    # 4. Call Mistral
+    # 5. Call Mistral
     status_code, content = await call_upstream_llm(body)
     latency_ms = int((time.perf_counter() - start) * 1000)
     cache_status = "MISS" if cacheable else "UNCACHEABLE"
     print(f"Returned status={status_code} cache_status={cache_status} latency={latency_ms}ms")
 
-    # 5. Cache successful response and log to Postgres
+    # 6. Cache successful response and log to Postgres
     if status_code == 200:
         if cacheable:
+            # The exact cache needs no embedding, so it is written even when degraded.
             await set_cached_response(cache_key, content)
-            await store_semantic_cache_entry(
-                tenant_uuid,
-                normalized_query,
-                cache_key,
-                content,
-                embedding,
-                model,
-                raw_query=raw_query,
-            )
+            if embedding is not None:
+                await store_semantic_cache_entry(
+                    tenant_uuid,
+                    normalized_query,
+                    cache_key,
+                    content,
+                    embedding,
+                    model,
+                    raw_query=raw_query,
+                )
 
         await log_request_result(
             tenant_id=tenant_id,
@@ -195,161 +219,12 @@ async def proxy(request: Request):
             cache_status=cache_status,
         )
 
+    headers = {"X-Cache": cache_status}
+    if degraded:
+        headers[DEGRADED_HEADER] = EMBEDDING_UNAVAILABLE
+
     return JSONResponse(
         content=content,
         status_code=status_code,
-        headers={"X-Cache": cache_status},
+        headers=headers,
     )
-
-
-@router.get("/stats")
-async def get_stats(tenant_id: int):
-    if db.pool is None:
-        raise HTTPException(status_code=500, detail="Postgres pool is not initialized")
-
-    async with db.pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT
-                COALESCE(cache_status, 'UNKNOWN') AS cache_status,
-                COUNT(*) AS count,
-                AVG(latency_ms) AS avg_latency_ms,
-                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
-                COALESCE(SUM(completion_tokens), 0) AS completion_tokens
-            FROM requests
-            WHERE tenant_id = $1
-            GROUP BY COALESCE(cache_status, 'UNKNOWN')
-            """,
-            tenant_id,
-        )
-
-    counts = {"EXACT_HIT": 0, "SEMANTIC_HIT": 0, "MISS": 0, "UNCACHEABLE": 0}
-    avg_latency_by_cache_status = {}
-    total_requests = 0
-    prompt_tokens_saved = 0
-    completion_tokens_saved = 0
-
-    for row in rows:
-        status = row["cache_status"]
-        count = row["count"]
-        total_requests += count
-        if status in counts:
-            counts[status] = count
-        avg_latency_by_cache_status[status] = (
-            float(row["avg_latency_ms"]) if row["avg_latency_ms"] is not None else None
-        )
-        if status in ("EXACT_HIT", "SEMANTIC_HIT"):
-            prompt_tokens_saved += row["prompt_tokens"]
-            completion_tokens_saved += row["completion_tokens"]
-
-    hit_count = counts["EXACT_HIT"] + counts["SEMANTIC_HIT"]
-    hit_rate = hit_count / total_requests if total_requests else 0.0
-
-    # Prompt and completion tokens are priced differently by every upstream, so the
-    # split is what callers actually need to cost this out. estimated_cost_saved_usd
-    # stays on the flat COST_PER_1K_TOKENS blend for existing consumers.
-    tokens_saved = prompt_tokens_saved + completion_tokens_saved
-
-    return {
-        "tenant_id": tenant_id,
-        "total_requests": total_requests,
-        "exact_hit_count": counts["EXACT_HIT"],
-        "semantic_hit_count": counts["SEMANTIC_HIT"],
-        "miss_count": counts["MISS"],
-        "uncacheable_count": counts["UNCACHEABLE"],
-        "hit_rate": round(hit_rate, 4),
-        "avg_latency_ms_by_cache_status": avg_latency_by_cache_status,
-        "prompt_tokens_saved": prompt_tokens_saved,
-        "completion_tokens_saved": completion_tokens_saved,
-        "estimated_cost_saved_usd": round((tokens_saved / 1000) * COST_PER_1K_TOKENS, 6),
-    }
-
-
-def _format_day(value) -> str:
-    """date_trunc gives back a datetime; the API contract is a plain YYYY-MM-DD string."""
-    if isinstance(value, str):
-        return value[:10]
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-    return value.isoformat()
-
-
-@router.get("/stats/trend")
-async def get_stats_trend(tenant_id: int):
-    if db.pool is None:
-        raise HTTPException(status_code=500, detail="Postgres pool is not initialized")
-
-    async with db.pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT
-                date_trunc('day', timestamp) AS day,
-                COUNT(*) AS total_requests,
-                COUNT(*) FILTER (
-                    WHERE cache_status IN ('EXACT_HIT', 'SEMANTIC_HIT')
-                ) AS hit_count
-            FROM requests
-            WHERE tenant_id = $1
-              AND timestamp >= date_trunc('day', now()) - INTERVAL '6 days'
-            GROUP BY date_trunc('day', timestamp)
-            ORDER BY date_trunc('day', timestamp)
-            """,
-            tenant_id,
-        )
-
-    trend = []
-    for row in rows:
-        total = row["total_requests"]
-        hits = row["hit_count"]
-        trend.append(
-            {
-                "date": _format_day(row["day"]),
-                "total_requests": total,
-                "hit_count": hits,
-                "hit_rate": round(hits / total, 4) if total else 0.0,
-            }
-        )
-
-    return {"tenant_id": tenant_id, "trend": trend}
-
-
-@router.get("/stats/top-cached")
-async def get_top_cached(tenant_id: int):
-    if db.pool is None:
-        raise HTTPException(status_code=500, detail="Postgres pool is not initialized")
-
-    async with db.pool.acquire() as conn:
-        # requests keys on the integer tenants.id, cache_entries on tenants.uuid
-        # (see app/auth.py, which resolves both off the API key). Join so this
-        # endpoint takes the same tenant_id param as the other stats routes.
-        rows = await conn.fetch(
-            """
-            SELECT
-                cache_entries.normalized_query,
-                cache_entries.hit_count,
-                cache_entries.min_similarity,
-                cache_entries.max_similarity
-            FROM cache_entries
-            JOIN tenants ON tenants.uuid = cache_entries.tenant_id
-            WHERE tenants.id = $1
-            ORDER BY cache_entries.hit_count DESC
-            LIMIT 20
-            """,
-            tenant_id,
-        )
-
-    entries = [
-        {
-            "normalized_query": row["normalized_query"],
-            "hit_count": row["hit_count"] or 0,
-            "min_similarity": (
-                float(row["min_similarity"]) if row["min_similarity"] is not None else None
-            ),
-            "max_similarity": (
-                float(row["max_similarity"]) if row["max_similarity"] is not None else None
-            ),
-        }
-        for row in rows
-    ]
-
-    return {"tenant_id": tenant_id, "entries": entries}

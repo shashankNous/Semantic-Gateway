@@ -1,23 +1,13 @@
 /**
- * The dashboard fetches from a same-origin `/gateway/*` path, which Next rewrites
- * to the real FastAPI gateway on the server side. Going straight from the browser
- * to the gateway would need CORS headers on the Python app, which this dashboard
- * deliberately does not require — the gateway stays untouched.
+ * The `/gateway/*` proxy used to be a rewrite here. It now lives in
+ * app/gateway/[...path]/route.ts, because the stats endpoints require a bearer
+ * token and a rewrite cannot attach one server-side — the browser would have had
+ * to hold the credential.
+ *
+ * NEXT_PUBLIC_GATEWAY_URL is still read by that route handler and shown in the UI.
  */
-const GATEWAY_URL = (
-  process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8000"
-).replace(/\/+$/, "");
 
 /** @type {import('next').NextConfig} */
-const nextConfig = {
-  async rewrites() {
-    return [
-      {
-        source: "/gateway/:path*",
-        destination: `${GATEWAY_URL}/:path*`,
-      },
-    ];
-  },
-};
+const nextConfig = {};
 
 export default nextConfig;

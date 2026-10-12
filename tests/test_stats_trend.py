@@ -1,7 +1,8 @@
 import asyncio
+from uuid import uuid4
 from datetime import datetime, timezone
 
-import app.routes.proxy as proxy_module
+import app.routes.stats as stats_module
 
 
 class FakeAcquire:
@@ -33,6 +34,20 @@ class FakeTrendConn:
         return self.rows
 
 
+def dashboard_tenant(tenant_id, tenant_uuid=None):
+    """What app.auth.require_dashboard_key() hands the route once the token resolves.
+
+    The routes take this dict, never a caller-supplied tenant_id — that is the
+    whole point of Task 2, so the tests call them the same way the app does.
+    """
+    return {
+        "tenant_id": tenant_id,
+        "tenant_uuid": tenant_uuid or uuid4(),
+        "name": f"tenant-{tenant_id}",
+        "scope": "dashboard",
+    }
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -47,9 +62,9 @@ def test_trend_returns_daily_hit_rate_oldest_first(monkeypatch):
         {"day": day(2026, 8, 11), "total_requests": 8, "hit_count": 6},
         {"day": day(2026, 8, 12), "total_requests": 3, "hit_count": 3},
     ]
-    monkeypatch.setattr(proxy_module.db, "pool", FakePool(FakeTrendConn(rows)))
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(FakeTrendConn(rows)))
 
-    result = run(proxy_module.get_stats_trend(tenant_id=1))
+    result = run(stats_module.get_stats_trend(tenant=dashboard_tenant(1)))
     trend = result["trend"]
 
     assert result["tenant_id"] == 1
@@ -66,9 +81,9 @@ def test_trend_returns_daily_hit_rate_oldest_first(monkeypatch):
 
 def test_trend_handles_day_with_no_requests(monkeypatch):
     rows = [{"day": day(2026, 8, 12), "total_requests": 0, "hit_count": 0}]
-    monkeypatch.setattr(proxy_module.db, "pool", FakePool(FakeTrendConn(rows)))
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(FakeTrendConn(rows)))
 
-    trend = run(proxy_module.get_stats_trend(tenant_id=1))["trend"]
+    trend = run(stats_module.get_stats_trend(tenant=dashboard_tenant(1)))["trend"]
 
     assert trend[0]["hit_rate"] == 0.0
 
@@ -78,17 +93,17 @@ def test_trend_accepts_string_and_date_days(monkeypatch):
         {"day": "2026-08-10T00:00:00+00:00", "total_requests": 2, "hit_count": 1},
         {"day": day(2026, 8, 11).date(), "total_requests": 2, "hit_count": 1},
     ]
-    monkeypatch.setattr(proxy_module.db, "pool", FakePool(FakeTrendConn(rows)))
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(FakeTrendConn(rows)))
 
-    trend = run(proxy_module.get_stats_trend(tenant_id=1))["trend"]
+    trend = run(stats_module.get_stats_trend(tenant=dashboard_tenant(1)))["trend"]
 
     assert [point["date"] for point in trend] == ["2026-08-10", "2026-08-11"]
 
 
 def test_trend_for_brand_new_tenant_is_empty(monkeypatch):
-    monkeypatch.setattr(proxy_module.db, "pool", FakePool(FakeTrendConn([])))
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(FakeTrendConn([])))
 
-    result = run(proxy_module.get_stats_trend(tenant_id=99))
+    result = run(stats_module.get_stats_trend(tenant=dashboard_tenant(99)))
 
     assert result["trend"] == []
     assert result["tenant_id"] == 99
@@ -96,9 +111,9 @@ def test_trend_for_brand_new_tenant_is_empty(monkeypatch):
 
 def test_trend_query_is_scoped_to_tenant_and_last_7_days(monkeypatch):
     conn = FakeTrendConn([])
-    monkeypatch.setattr(proxy_module.db, "pool", FakePool(conn))
+    monkeypatch.setattr(stats_module.db, "pool", FakePool(conn))
 
-    run(proxy_module.get_stats_trend(tenant_id=7))
+    run(stats_module.get_stats_trend(tenant=dashboard_tenant(7)))
 
     sql, param = conn.calls[0]
     assert param == 7

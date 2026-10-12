@@ -2,47 +2,34 @@
 
 import type { Stats } from "@/lib/gateway";
 import {
-  MODELS,
   computeSavings,
+  dominantModel,
   formatTokens,
   formatUsd,
-  getModel,
+  getPricing,
 } from "@/lib/pricing";
 import { Card, EmptyState, Skeleton, Stat } from "@/components/ui";
 
+/**
+ * What the cache avoided spending, priced against the model that actually served
+ * the traffic.
+ *
+ * Every figure here traces to a recorded request: token counts come from the
+ * upstream `usage` block on the responses the cache replayed, and the model comes
+ * from `requests.model`. There is no "what if you used a different model" mode —
+ * that produced a headline number that changed with a dropdown while the
+ * underlying traffic stayed the same.
+ */
 export function SavingsPanel({
   stats,
   loading,
-  modelId,
-  onModelChange,
 }: {
   stats: Stats | null;
   loading: boolean;
-  modelId: string;
-  onModelChange: (id: string) => void;
 }) {
-  const model = getModel(modelId);
-
-  const modelPicker = (
-    <label className="flex items-center gap-2 text-sm">
-      <span className="text-sidecar/75">Priced as</span>
-      <select
-        value={modelId}
-        onChange={(event) => onModelChange(event.target.value)}
-        className="rounded-md border border-sidecar/25 bg-brand-deep px-3 py-1.5 text-sm text-sidecar outline-none transition focus:border-sidecar"
-      >
-        {MODELS.map((option) => (
-          <option key={option.id} value={option.id}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-
   if (loading) {
     return (
-      <Card title="Saved by caching" action={modelPicker}>
+      <Card title="Saved by caching">
         <Skeleton className="h-20 w-72" />
         <div className="mt-6 grid gap-3 sm:grid-cols-3">
           <Skeleton className="h-16" />
@@ -55,7 +42,7 @@ export function SavingsPanel({
 
   if (!stats || stats.total_requests === 0) {
     return (
-      <Card title="Saved by caching" action={modelPicker}>
+      <Card title="Saved by caching">
         <EmptyState
           title="No requests yet"
           hint="Send some traffic through the gateway and your savings will show up here."
@@ -64,23 +51,37 @@ export function SavingsPanel({
     );
   }
 
-  const { promptCost, completionCost, total } = computeSavings(
-    stats.prompt_tokens_saved,
-    stats.completion_tokens_saved,
-    model,
-  );
+  const observed = dominantModel(stats.models);
+  const pricing = getPricing(observed?.model ?? null);
+  const mixed = (stats.models?.length ?? 0) > 1;
+
+  const tokensSaved = stats.prompt_tokens_saved + stats.completion_tokens_saved;
+  const savings = pricing
+    ? computeSavings(stats.prompt_tokens_saved, stats.completion_tokens_saved, pricing)
+    : null;
+
+  const subtitle = observed
+    ? pricing
+      ? `${observed.model} · $${pricing.inputPerMillion}/M input, $${pricing.outputPerMillion}/M output`
+      : `${observed.model} · no published rate on file, so tokens only`
+    : undefined;
 
   return (
-    <Card
-      title="Saved by caching"
-      subtitle={`${model.label} — $${model.inputPerMillion}/M input, $${model.outputPerMillion}/M output`}
-      action={modelPicker}
-    >
-      <p className="text-6xl font-bold tracking-tight text-sidecar tabular-nums sm:text-7xl">
-        {formatUsd(total)}
-      </p>
+    <Card title="Saved by caching" subtitle={subtitle}>
+      {savings ? (
+        <p className="text-6xl font-bold tracking-tight text-sidecar tabular-nums sm:text-7xl">
+          {formatUsd(savings.total)}
+        </p>
+      ) : (
+        <p className="text-6xl font-bold tracking-tight text-sidecar tabular-nums sm:text-7xl">
+          {formatTokens(tokensSaved)}
+          <span className="ml-3 text-2xl font-normal text-sidecar/75">tokens</span>
+        </p>
+      )}
+
       <p className="mt-2 text-sm text-sidecar/75">
-        across {formatTokens(stats.total_requests)} requests · {(stats.hit_rate * 100).toFixed(1)}% hit rate
+        across {formatTokens(stats.total_requests)} requests ·{" "}
+        {(stats.hit_rate * 100).toFixed(1)}% hit rate
       </p>
 
       <dl className="mt-6 grid gap-3 sm:grid-cols-3">
@@ -89,9 +90,11 @@ export function SavingsPanel({
           value={
             <>
               {formatTokens(stats.prompt_tokens_saved)}
-              <span className="ml-2 text-sm font-normal text-sidecar/75">
-                {formatUsd(promptCost)}
-              </span>
+              {savings && (
+                <span className="ml-2 text-sm font-normal text-sidecar/75">
+                  {formatUsd(savings.promptCost)}
+                </span>
+              )}
             </>
           }
         />
@@ -100,21 +103,29 @@ export function SavingsPanel({
           value={
             <>
               {formatTokens(stats.completion_tokens_saved)}
-              <span className="ml-2 text-sm font-normal text-sidecar/75">
-                {formatUsd(completionCost)}
-              </span>
+              {savings && (
+                <span className="ml-2 text-sm font-normal text-sidecar/75">
+                  {formatUsd(savings.completionCost)}
+                </span>
+              )}
             </>
           }
         />
         <Stat
           label="Cache hits"
-          value={`${formatTokens(stats.exact_hit_count + stats.semantic_hit_count)}`}
+          value={`${formatTokens(
+            stats.exact_hit_count + stats.semantic_hit_count,
+          )}`}
         />
       </dl>
 
-      <p className="mt-4 text-xs text-sidecar/75">
-        Gateway&apos;s own blended estimate: {formatUsd(stats.estimated_cost_saved_usd)}
-      </p>
+      {mixed && (
+        <p className="mt-4 text-xs text-sidecar/75">
+          Traffic spans {stats.models.length} models (
+          {stats.models.map((m) => `${m.model} x${m.requests}`).join(", ")}). Priced
+          against {observed?.model}, so this is approximate.
+        </p>
+      )}
     </Card>
   );
 }

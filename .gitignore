@@ -6,3 +6,10 @@ __pycache__/
 # Per-machine Claude Code settings (permission grants, local paths).
 # .claude/launch.json is shared and stays tracked.
 .claude/settings.local.json
+
+# Local Ollama testing: real config and the credentials local_setup.py issues.
+.env.local
+.local-credentials.json
+.local-broken-gateway.log
+.env.local.padded
+.local-smoke-similarity.json

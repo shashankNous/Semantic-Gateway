@@ -1,14 +1,18 @@
 /**
- * Per-model token pricing, in USD per million tokens.
+ * Token pricing for the upstream models this gateway actually proxies to.
  *
- * Savings are computed client-side rather than server-side on purpose: the
- * gateway records how many tokens the cache avoided sending upstream, but what
- * those tokens would have *cost* depends entirely on which model you would have
- * called. Switching the dropdown reprices the same token counts instantly.
+ * Deliberately **not** a model picker. An earlier version let you reprice the
+ * saved tokens as GPT-4o or Claude Sonnet, which put a dollar figure under a
+ * vendor's name for traffic that never touched that vendor — the headline number
+ * moved 12x depending on a dropdown, which is exactly what a cost figure must not
+ * do. What the cache saved is a fact about the model that served the traffic, and
+ * the gateway now reports which model that was (`stats.models`).
+ *
+ * Keys are the upstream model ids as recorded in `requests.model`, so a model with
+ * no entry here is priced as unknown rather than silently as something else.
  */
 
 export interface ModelPricing {
-  id: string;
   label: string;
   /** USD per 1M input (prompt) tokens. */
   inputPerMillion: number;
@@ -16,40 +20,55 @@ export interface ModelPricing {
   outputPerMillion: number;
 }
 
-export const MODELS: ModelPricing[] = [
-  {
-    id: "mistral-small",
+export const MODEL_PRICING: Record<string, ModelPricing> = {
+  "mistral-small-latest": {
     label: "Mistral Small",
     inputPerMillion: 0.2,
     outputPerMillion: 0.6,
   },
-  {
-    id: "gpt-4o",
-    label: "GPT-4o",
-    inputPerMillion: 2.5,
-    outputPerMillion: 10,
+  "mistral-medium-latest": {
+    label: "Mistral Medium",
+    inputPerMillion: 0.4,
+    outputPerMillion: 2,
   },
-  {
-    id: "claude-sonnet",
-    label: "Claude Sonnet",
-    inputPerMillion: 3,
-    outputPerMillion: 15,
+  "mistral-large-latest": {
+    label: "Mistral Large",
+    inputPerMillion: 2,
+    outputPerMillion: 6,
   },
-];
+};
 
-export const DEFAULT_MODEL_ID = MODELS[0].id;
+export interface ObservedModel {
+  model: string;
+  requests: number;
+}
 
-export function getModel(id: string): ModelPricing {
-  return MODELS.find((model) => model.id === id) ?? MODELS[0];
+/** Pricing for a model id, or null when we have no published rate for it. */
+export function getPricing(model: string | null): ModelPricing | null {
+  if (!model) return null;
+  return MODEL_PRICING[model] ?? null;
+}
+
+/**
+ * The model that served most of this tenant's traffic, or null if the gateway
+ * reported none. Mixed-model traffic is reported separately by the caller rather
+ * than blended, since blending two price points produces a number that is true of
+ * neither.
+ */
+export function dominantModel(models: ObservedModel[] | undefined): ObservedModel | null {
+  if (!models || models.length === 0) return null;
+  return models.reduce((best, current) =>
+    current.requests > best.requests ? current : best,
+  );
 }
 
 export function computeSavings(
   promptTokens: number,
   completionTokens: number,
-  model: ModelPricing,
+  pricing: ModelPricing,
 ): { promptCost: number; completionCost: number; total: number } {
-  const promptCost = (promptTokens / 1_000_000) * model.inputPerMillion;
-  const completionCost = (completionTokens / 1_000_000) * model.outputPerMillion;
+  const promptCost = (promptTokens / 1_000_000) * pricing.inputPerMillion;
+  const completionCost = (completionTokens / 1_000_000) * pricing.outputPerMillion;
 
   return { promptCost, completionCost, total: promptCost + completionCost };
 }

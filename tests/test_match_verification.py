@@ -31,3 +31,108 @@ def test_entity_mismatch_is_conservative_without_entities():
 
 def test_entity_mismatch_allows_shared_entities():
     assert has_entity_mismatch("weather in Delhi tomorrow", "forecast for Delhi") is False
+
+
+# --- Entity sets must match, not merely overlap ---------------------------------
+# These pairs share at least one entity ("July", "API", "Python", "Docker"), which the
+# old any-overlap rule accepted. Found by the local smoke test's gap probes.
+
+import pytest
+
+
+@pytest.mark.parametrize(
+    "query_a, query_b",
+    [
+        ("What is the weather like in Delhi in July?", "What is the weather like in Mumbai in July?"),
+        ("Should I use v2 of the API?", "Should I use v3 of the API?"),
+        (
+            "How hot does the weather get in Delhi during summer?",
+            "How hot does the weather get in Mumbai during summer?",
+        ),
+        ("Should we use v2 for this project?", "Should we use v3 for this project?"),
+        ("Does this work on Python 3.11?", "Does this work on Python 3.12?"),
+        ("What is the capital of Paris?", "What is the capital of London?"),
+        # One side names an extra entity.
+        ("How do I install Docker?", "How do I install Docker on Ubuntu?"),
+        # A different acronym is a different entity.
+        ("How do I query it with SQL?", "How do I query it with GraphQL?"),
+    ],
+)
+def test_entity_mismatch_when_entity_sets_differ(query_a, query_b):
+    assert has_entity_mismatch(query_a, query_b) is True
+    assert has_entity_mismatch(query_b, query_a) is True
+
+
+@pytest.mark.parametrize(
+    "query_a, query_b",
+    [
+        ("What is pgvector?", "Can you explain what pgvector is?"),
+        ("How do I reset my password?", "I forgot my password, how do I change it?"),
+        # Only sentence-initial words differ in capitalisation.
+        ("Can you list the API limits?", "What are the API limits?"),
+        ("How do I rotate keys in Vault?", "What is the way to rotate keys in Vault?"),
+        # Same entities, different order.
+        ("Compare Delhi and Mumbai", "Compare Mumbai and Delhi"),
+        # A shared acronym is fine.
+        ("Should I use v2 of the API?", "Is v2 of the API recommended?"),
+    ],
+)
+def test_no_entity_mismatch_when_entity_sets_match(query_a, query_b):
+    assert has_entity_mismatch(query_a, query_b) is False
+    assert has_entity_mismatch(query_b, query_a) is False
+
+
+def test_version_tokens_compare_case_insensitively():
+    assert has_entity_mismatch("Should I use V2 here?", "Should I use v2 here?") is False
+
+
+def test_question_words_after_a_comma_are_not_entities():
+    """Capitalised mid-sentence only because of sloppy punctuation."""
+    assert has_entity_mismatch("I forgot my password, How do I reset it?",
+                               "How do I reset my password?") is False
+
+
+def test_i_and_its_contractions_are_not_entities():
+    assert has_entity_mismatch("Why can't I'm log in after I've reset it?",
+                               "Why can't I log in after a reset?") is False
+
+
+# --- Item 2: stopwords must not hide real entities -------------------------------
+
+
+@pytest.mark.parametrize(
+    "query_a, query_b",
+    [
+        # All-caps acronyms whose lowercase form is a stopword.
+        ("Do I need a visa for the US?", "Do I need a visa for the UK?"),
+        ("Do you offer IT support?", "Do you offer HR support?"),
+        ("What does the WHO say about this?", "What does the CDC say about this?"),
+        # A month that is also a modal verb.
+        ("When should we deploy in May?", "When should we deploy in June?"),
+        # A given name that is also a modal verb.
+        ("Is Will on the release rota?", "Is Sam on the release rota?"),
+        # An acronym opening the sentence is still an acronym.
+        ("WHO guidance on masks?", "CDC guidance on masks?"),
+    ],
+)
+def test_stopword_lookalikes_are_still_compared(query_a, query_b):
+    assert has_entity_mismatch(query_a, query_b) is True
+    assert has_entity_mismatch(query_b, query_a) is True
+
+
+@pytest.mark.parametrize(
+    "query_a, query_b",
+    [
+        # A shouted question carries no capitalisation information.
+        ("WHAT IS PGVECTOR?", "what is pgvector?"),
+        ("WHAT IS PGVECTOR?", "What is pgvector?"),
+        ("What is pgvector?", "Can you explain what pgvector is?"),
+        ("How do I reset my password?", "I forgot my password, how do I change it?"),
+        # Modal "may"/"will" in lower case are not entities.
+        ("Will this work on Linux?", "Can this work on Linux?"),
+        ("How may I export it to S3?", "How can I export it to S3?"),
+    ],
+)
+def test_stopword_audit_keeps_accepting_paraphrases(query_a, query_b):
+    assert has_entity_mismatch(query_a, query_b) is False
+    assert has_entity_mismatch(query_b, query_a) is False

@@ -6,6 +6,24 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "dashboard", "run", "dev"],
       "port": 3000
+    },
+    {
+      "name": "gateway",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "gateway-local",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["scripts/run_local_gateway.py"],
+      "port": 8010
+    },
+    {
+      "name": "gateway-local-padded",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["scripts/run_local_gateway.py", "--env-file", ".env.local.padded"],
+      "port": 8010
     }
   ]
 }

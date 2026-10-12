@@ -6,15 +6,17 @@ to drive real traffic through the gateway first.
     python scripts/seed_demo.py
 
 Reads DATABASE_URL from the environment, falling back to the local demo Postgres
-on port 5433. Applies migrations 001-004 if they are not already in place, then
-replaces any previous demo data — safe to run repeatedly.
+on port 5433. Applies every migration in `migrations/` if they are not already in
+place — globbed, not named, so a newly added one is picked up with no change here
+(see `scripts/_migrations.py`) — then replaces any previous demo data. Safe to run
+repeatedly.
 
 Seeds two tenants:
   * "Demo Co"      — 7 days of traffic and a warm semantic cache
   * "Brand New Co" — no data at all, for checking the empty states
 
-This writes only to tenants whose api_key starts with 'demo-'; it never touches
-rows belonging to real tenants.
+This writes only to the two demo tenants below, identified by the hash of their
+fixed demo credentials; it never touches rows belonging to real tenants.
 """
 
 import asyncio
@@ -28,16 +30,30 @@ import sys
 import asyncpg
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-MIGRATIONS = REPO / "migrations"
+sys.path.insert(0, str(REPO))
+
+from app.security import hash_token  # noqa: E402  (path setup must precede the import)
+from app.services.embeddings import EMBEDDING_DIM  # noqa: E402  (same)
+from scripts._migrations import (  # noqa: E402  (same)
+    FIRST_MIGRATION,
+    MIGRATIONS_DIR,
+    apply_rerunnable_migrations,
+)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql://postgres:demopw@localhost:5433/semanticdb"
 )
 
-DEMO_KEY = "demo-tenant-key"
-EMPTY_KEY = "demo-empty-key"
+# Fixed, well-known, local-demo-only credentials — the whole point is that the
+# README and the dashboard's .env.example can name them. Never seed these against
+# anything reachable from outside your machine.
+DEMO_PROXY_KEY = "sk-demo-tenant-key"
+DEMO_DASHBOARD_TOKEN = "dash_demo-tenant-token"
+EMPTY_PROXY_KEY = "sk-demo-empty-key"
+EMPTY_DASHBOARD_TOKEN = "dash_demo-empty-token"
 
-EMBEDDING_DIMS = 1536
+# Matches the column width the migrations create (EMBEDDING_DIM, default 1536).
+EMBEDDING_DIMS = EMBEDDING_DIM
 
 # (normalized_query, min_similarity, max_similarity). Hit counts are not listed
 # here: they are derived from the generated traffic so the "top cached" table and
@@ -96,34 +112,55 @@ def distribute_hits(total: int, buckets: int) -> list[int]:
 
 async def ensure_schema(conn: asyncpg.Connection) -> None:
     # 001 predates the IF NOT EXISTS convention, so only run it on a fresh
-    # database. 002-004 are all idempotent and safe to re-apply.
+    # database. Everything after it is idempotent and safe to re-apply.
     if await conn.fetchval("SELECT to_regclass('public.tenants')") is None:
-        await conn.execute((MIGRATIONS / "001_migrations.sql").read_text(encoding="utf-8"))
-        print("  applied 001_migrations.sql")
+        await conn.execute((MIGRATIONS_DIR / FIRST_MIGRATION).read_text(encoding="utf-8"))
+        print(f"  applied {FIRST_MIGRATION}")
 
-    for name in (
-        "002_semantic_cache.sql",
-        "003_raw_query.sql",
-        "004_cache_entry_stats.sql",
-    ):
-        await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
+    for name in await apply_rerunnable_migrations(conn):
         print(f"  applied {name}")
 
+    # 001 still creates the plaintext api_key column on a fresh database. The demo
+    # tenants below never populate it, and NOT NULL would block the insert. On a
+    # database where scripts/migrate_hash_keys.py already dropped the column there
+    # is nothing to relax, hence the guard.
+    await conn.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'tenants' AND column_name = 'api_key'
+            ) THEN
+                ALTER TABLE tenants ALTER COLUMN api_key DROP NOT NULL;
+            END IF;
+        END $$;
+        """
+    )
 
-async def upsert_tenant(conn: asyncpg.Connection, api_key: str, name: str):
+
+async def upsert_tenant(
+    conn: asyncpg.Connection, proxy_key: str, dashboard_token: str, name: str
+):
     """Reuse the existing demo tenant row if there is one.
 
     Deleting and re-inserting would burn a new SERIAL id on every run, so the
-    tenant id you type into the dashboard would change each time. Upserting
-    keeps it stable.
+    tenant id in the dashboard would change each time. Upserting keeps it stable.
+    Only hashes are ever written — the plaintext demo credentials live in this
+    file, not in the database.
     """
     return await conn.fetchrow(
         """
-        INSERT INTO tenants (api_key, name) VALUES ($1, $2)
-        ON CONFLICT (api_key) DO UPDATE SET name = EXCLUDED.name
+        INSERT INTO tenants (api_key_hash, dashboard_token_hash, name)
+        VALUES ($1, $2, $3)
+        -- Predicate must be restated: tenants_api_key_hash_idx is a partial index.
+        ON CONFLICT (api_key_hash) WHERE api_key_hash IS NOT NULL DO UPDATE
+            SET name = EXCLUDED.name,
+                dashboard_token_hash = EXCLUDED.dashboard_token_hash
         RETURNING id, uuid
         """,
-        api_key,
+        hash_token(proxy_key),
+        hash_token(dashboard_token),
         name,
     )
 
@@ -231,8 +268,8 @@ async def main() -> int:
     try:
         await ensure_schema(conn)
 
-        demo = await upsert_tenant(conn, DEMO_KEY, "Demo Co")
-        empty = await upsert_tenant(conn, EMPTY_KEY, "Brand New Co")
+        demo = await upsert_tenant(conn, DEMO_PROXY_KEY, DEMO_DASHBOARD_TOKEN, "Demo Co")
+        empty = await upsert_tenant(conn, EMPTY_PROXY_KEY, EMPTY_DASHBOARD_TOKEN, "Brand New Co")
 
         await clear_demo_history(conn, demo["id"], demo["uuid"])
         await clear_demo_history(conn, empty["id"], empty["uuid"])
@@ -245,8 +282,15 @@ async def main() -> int:
 
         print("\nDone.")
         print(f"  Demo Co       -> tenant_id = {demo['id']}   (has data)")
+        print(f"    proxy key       {DEMO_PROXY_KEY}")
+        print(f"    dashboard token {DEMO_DASHBOARD_TOKEN}")
         print(f"  Brand New Co  -> tenant_id = {empty['id']}   (empty, for empty states)")
-        print("\nEnter the tenant id in the dashboard's Tenant ID field.")
+        print(f"    proxy key       {EMPTY_PROXY_KEY}")
+        print(f"    dashboard token {EMPTY_DASHBOARD_TOKEN}")
+        print(
+            "\nThe dashboard picks its tenant from GATEWAY_DASHBOARD_TOKEN, not from a"
+            "\ntenant id - set it in dashboard/.env.local to switch which tenant you see."
+        )
     finally:
         await conn.close()
 
